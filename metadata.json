@@ -1,0 +1,6 @@
+{
+  "name": "TREND STREET",
+  "description": "Premium modern men's fashion and streetwear store based in Mainpuri, Uttar Pradesh, India.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
