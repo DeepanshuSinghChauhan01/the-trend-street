@@ -5,6 +5,11 @@ export interface ProductImage {
   url: string;
   altText: string;
   isPrimary?: boolean;
+  sortOrder?: number;
+  // Undefined/absent = product-level fallback image (shown when the selected
+  // color has no images of its own, or for products with no color-specific
+  // images at all — this is how every pre-existing product's images behave).
+  color?: string;
 }
 
 export interface ProductVariant {
@@ -29,6 +34,8 @@ export interface Product {
   shortDescription: string;
   description: string;
   category: string; // 't-shirts' | 'shirts' | 'jeans' | 'trousers' | 'jackets' | 'hoodies' | 'polos'
+  subcategory?: string;
+  gender: 'men' | 'women' | 'unisex';
   collection?: string; // 'summer-drop' | 'luxury-minimal' | 'vintage-wash' | 'street-essentials'
   images: ProductImage[];
   videoUrl?: string;
@@ -245,4 +252,116 @@ export interface StoreConfig {
   freeShippingThreshold: number;
   standardShippingFee: number;
   expressLocalAvailable: boolean;
+}
+
+// Payload shape sent from the Admin product form (create + edit) to /api/admin/products
+export interface AdminProductVariantInput {
+  id?: string; // present when editing an existing variant
+  color: string;
+  colorHex: string;
+  size: string;
+  price: number;
+  compareAtPrice?: number;
+  stock: number;
+  skuSuffix?: string;
+  // When set, used verbatim as the variant SKU instead of being derived from
+  // the product SKU + color/size (skuSuffix). Used by the CSV importer, where
+  // each row already carries its own complete, authoritative SKU.
+  exactSku?: string;
+}
+
+export interface AdminProductImageInput {
+  id?: string;
+  url: string;
+  altText?: string;
+  isPrimary?: boolean;
+  color?: string;
+}
+
+export interface AdminProductInput {
+  title: string;
+  slug?: string;
+  brand?: string;
+  shortDescription?: string;
+  description: string;
+  categorySlug: string;
+  subcategory?: string;
+  collectionSlug?: string;
+  gender?: 'men' | 'women' | 'unisex';
+  sku: string;
+  basePrice: number;
+  compareAtPrice?: number;
+  discountPercentage?: number;
+  status?: ProductStatus;
+  tags?: string[];
+  productType?: string;
+  material?: string;
+  fit?: string;
+  careInstructions?: string;
+  weightGrams?: number;
+  videoUrl?: string;
+  seoTitle?: string;
+  seoDescription?: string;
+  isFeatured?: boolean;
+  isNewArrival?: boolean;
+  isBestSeller?: boolean;
+  isTrending?: boolean;
+  images: AdminProductImageInput[];
+  variants: AdminProductVariantInput[];
+}
+
+export interface ProductListResult {
+  data: Product[];
+  total: number;
+  page: number;
+  pageSize: number;
+  hasMore: boolean;
+}
+
+// -------------------------------------------------------------------------
+// Bulk product CSV import/export (Admin > Products > Import Products)
+// -------------------------------------------------------------------------
+export type ImportRowAction = 'CREATE' | 'UPDATE' | 'UNCHANGED' | 'ERROR';
+
+export interface ImportFieldChange {
+  field: string;
+  from: string;
+  to: string;
+}
+
+export interface ImportRowResult {
+  rowNumber: number;
+  sku: string;
+  productTitle: string;
+  action: ImportRowAction;
+  isNewProduct: boolean;
+  errors: string[];
+  changes: ImportFieldChange[];
+}
+
+export interface ImportSummary {
+  totalRows: number;
+  productsNew: number;
+  productsUpdate: number;
+  productsUnchanged: number;
+  variantsNew: number;
+  variantsUpdate: number;
+  imagesNew: number;
+  errorCount: number;
+  categoriesMissing: string[];
+}
+
+export interface ImportPreviewResponse {
+  success: boolean;
+  summary: ImportSummary;
+  rows: ImportRowResult[];
+  message?: string;
+}
+
+export interface ImportCommitResponse {
+  success: boolean;
+  summary: ImportSummary;
+  rows: ImportRowResult[];
+  message?: string;
+  imported: boolean;
 }

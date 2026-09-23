@@ -8,6 +8,7 @@ import { Product, ProductVariant, Review } from '../types/index.js';
 import { useCart } from '../context/CartContext.js';
 import { useWishlist } from '../context/WishlistContext.js';
 import { ProductCard } from '../components/ProductCard.js';
+import { getGalleryImages } from '../lib/productImages.js';
 
 export const ProductDetailPage: React.FC = () => {
   const { slug } = useParams<{ slug: string }>();
@@ -62,6 +63,12 @@ export const ProductDetailPage: React.FC = () => {
     loadProduct();
     window.scrollTo({ top: 0, behavior: 'smooth' });
   }, [slug]);
+
+  // Switching colors shows that color's own gallery; reset to its first image
+  // so we never end up pointing at an index that doesn't exist in the new set.
+  useEffect(() => {
+    setActiveImageIndex(0);
+  }, [selectedColor]);
 
   // Run initial pincode check for default Mainpuri pin
   useEffect(() => {
@@ -161,6 +168,8 @@ export const ProductDetailPage: React.FC = () => {
     new Map(product.variants.map(v => [v.color, { name: v.color, hex: v.colorHex }])).values()
   );
 
+  const galleryImages = getGalleryImages(product.images, selectedColor);
+
   const availableSizes = ['XS', 'S', 'M', 'L', 'XL', 'XXL'].filter(s =>
     product.variants.some(v => v.color === selectedColor && v.size === s)
   );
@@ -181,7 +190,7 @@ export const ProductDetailPage: React.FC = () => {
       price: selectedVariant.price,
       compareAtPrice: selectedVariant.compareAtPrice,
       quantity,
-      image: product.images[activeImageIndex]?.url || product.images[0]?.url,
+      image: galleryImages[activeImageIndex]?.url || galleryImages[0]?.url,
       slug: product.slug,
       maxStock: selectedVariant.stock,
     });
@@ -200,7 +209,7 @@ export const ProductDetailPage: React.FC = () => {
         <ChevronRight className="w-3 h-3" />
         <Link to="/shop" className="hover:text-white transition-colors">Shop</Link>
         <ChevronRight className="w-3 h-3" />
-        <Link to={`/collections/${product.category}`} className="hover:text-white transition-colors capitalize">
+        <Link to={`/shop?category=${product.category}`} className="hover:text-white transition-colors capitalize">
           {product.category}
         </Link>
         <ChevronRight className="w-3 h-3" />
@@ -213,7 +222,7 @@ export const ProductDetailPage: React.FC = () => {
         <div className="lg:col-span-7 flex flex-col-reverse sm:flex-row gap-4">
           {/* Thumbnails */}
           <div className="flex sm:flex-col gap-2 overflow-x-auto sm:overflow-visible shrink-0 pb-2 sm:pb-0">
-            {product.images.map((img, idx) => (
+            {galleryImages.map((img, idx) => (
               <button
                 key={img.id}
                 onClick={() => setActiveImageIndex(idx)}
@@ -229,7 +238,7 @@ export const ProductDetailPage: React.FC = () => {
           {/* Main Stage Image */}
           <div className="flex-1 relative aspect-[3/4] bg-zinc-950 border border-zinc-800 overflow-hidden group">
             <img
-              src={product.images[activeImageIndex]?.url || product.images[0]?.url}
+              src={galleryImages[activeImageIndex]?.url || galleryImages[0]?.url}
               alt={product.title}
               className="w-full h-full object-cover object-center transition-transform duration-500 group-hover:scale-105"
             />

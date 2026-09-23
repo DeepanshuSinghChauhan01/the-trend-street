@@ -3,6 +3,7 @@ import { useNavigate, Link } from 'react-router-dom';
 import { ShieldCheck, Truck, CreditCard, Banknote, ArrowRight, Tag, Check, AlertCircle, MapPin, Phone } from 'lucide-react';
 import { useCart } from '../context/CartContext.js';
 import { useAuth } from '../context/AuthContext.js';
+import { supabase } from '../lib/supabase.js';
 import { ShippingAddress, Order } from '../types/index.js';
 
 declare global {
@@ -191,9 +192,15 @@ export const CheckoutPage: React.FC = () => {
         notes: shippingMethod === 'STORE_PICKUP' ? 'Store Pickup at Mainpuri Flagship' : undefined,
       };
 
+      const { data: sessionData } = await supabase.auth.getSession();
+      const headers: Record<string, string> = { 'Content-Type': 'application/json' };
+      if (sessionData.session) {
+        headers.Authorization = `Bearer ${sessionData.session.access_token}`;
+      }
+
       const res = await fetch('/api/orders/create', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers,
         body: JSON.stringify(orderPayload),
       });
 

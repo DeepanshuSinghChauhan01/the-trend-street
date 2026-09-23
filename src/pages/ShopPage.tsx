@@ -9,6 +9,12 @@ export const ShopPage: React.FC = () => {
   const [searchParams, setSearchParams] = useSearchParams();
   const [products, setProducts] = useState<Product[]>([]);
   const [isLoading, setIsLoading] = useState(true);
+  const [isLoadingMore, setIsLoadingMore] = useState(false);
+  const [page, setPage] = useState(1);
+  const [total, setTotal] = useState(0);
+  const [hasMore, setHasMore] = useState(false);
+  const [loadError, setLoadError] = useState('');
+  const [retryTick, setRetryTick] = useState(0);
   const [isMobileFilterOpen, setIsMobileFilterOpen] = useState(false);
   const [quickViewProduct, setQuickViewProduct] = useState<Product | null>(null);
 
@@ -40,9 +46,17 @@ export const ShopPage: React.FC = () => {
     { label: 'Above ₹4,000', min: 4000, max: 10000 },
   ];
 
+  // Reset to page 1 whenever filters change
+  useEffect(() => {
+    setPage(1);
+  }, [categoryFilter, sortFilter, sizeFilter, fitFilter, minPrice, maxPrice]);
+
   useEffect(() => {
     async function fetchFilteredProducts() {
-      setIsLoading(true);
+      if (page === 1) setIsLoading(true);
+      else setIsLoadingMore(true);
+      setLoadError('');
+
       try {
         const query = new URLSearchParams();
         if (categoryFilter) query.set('category', categoryFilter);
@@ -51,20 +65,29 @@ export const ShopPage: React.FC = () => {
         if (fitFilter) query.set('fit', fitFilter);
         if (minPrice) query.set('minPrice', minPrice);
         if (maxPrice) query.set('maxPrice', maxPrice);
+        query.set('page', String(page));
 
         const res = await fetch(`/api/products?${query.toString()}`);
         const data = await res.json();
         if (data.success) {
-          setProducts(data.data);
+          setProducts(prev => (page === 1 ? data.data : [...prev, ...data.data]));
+          setTotal(data.total || 0);
+          setHasMore(Boolean(data.hasMore));
+        } else {
+          setLoadError(data.message || 'Unable to load products. Please try again.');
+          if (page === 1) setProducts([]);
         }
       } catch (err) {
         console.error('Failed to load products', err);
+        setLoadError('Unable to load products. Please check your connection and try again.');
+        if (page === 1) setProducts([]);
       } finally {
         setIsLoading(false);
+        setIsLoadingMore(false);
       }
     }
     fetchFilteredProducts();
-  }, [categoryFilter, sortFilter, sizeFilter, fitFilter, minPrice, maxPrice]);
+  }, [categoryFilter, sortFilter, sizeFilter, fitFilter, minPrice, maxPrice, page, retryTick]);
 
   const updateParam = (key: string, value: string) => {
     const newParams = new URLSearchParams(searchParams);
@@ -270,7 +293,7 @@ export const ShopPage: React.FC = () => {
         {/* Product Grid Area */}
         <div className="lg:col-span-3">
           <div className="mb-4 flex justify-between items-center text-xs text-zinc-400">
-            <span>Showing {products.length} Garments</span>
+            <span>Showing {products.length} of {total} Garments</span>
           </div>
 
           {isLoading ? (
@@ -278,6 +301,17 @@ export const ShopPage: React.FC = () => {
               {[...Array(6)].map((_, i) => (
                 <div key={i} className="aspect-[3/4] bg-zinc-900 border border-zinc-800" />
               ))}
+            </div>
+          ) : loadError ? (
+            <div className="py-24 text-center space-y-4 border border-rose-900/60 bg-zinc-950 p-8">
+              <h3 className="font-display font-bold text-xl text-white">Unable to Load Products</h3>
+              <p className="text-xs text-rose-300 max-w-sm mx-auto">{loadError}</p>
+              <button
+                onClick={() => setRetryTick(t => t + 1)}
+                className="px-6 py-3 bg-white text-zinc-950 font-bold text-xs uppercase tracking-widest hover:bg-zinc-200 transition-colors"
+              >
+                Try Again
+              </button>
             </div>
           ) : products.length === 0 ? (
             <div className="py-24 text-center space-y-4 border border-zinc-800 bg-zinc-950 p-8">
@@ -301,6 +335,18 @@ export const ShopPage: React.FC = () => {
                   onQuickView={setQuickViewProduct}
                 />
               ))}
+            </div>
+          )}
+
+          {!isLoading && hasMore && (
+            <div className="mt-8 flex justify-center">
+              <button
+                onClick={() => setPage(p => p + 1)}
+                disabled={isLoadingMore}
+                className="px-8 py-3 bg-zinc-900 border border-zinc-700 text-white text-xs font-bold uppercase tracking-widest hover:border-zinc-500 transition-colors disabled:opacity-50"
+              >
+                {isLoadingMore ? 'Loading...' : 'Load More Garments'}
+              </button>
             </div>
           )}
         </div>

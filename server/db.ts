@@ -1,17 +1,20 @@
-import fs from 'fs';
-import path from 'path';
-import crypto from 'crypto';
 import {
   Product,
+  ProductImage,
+  ProductVariant,
   Category,
   Collection,
   Coupon,
   Order,
+  OrderItem,
   Review,
   InventoryLog,
   StoreConfig,
-  AdminMetrics
+  AdminMetrics,
+  ProductListResult,
+  AdminProductInput,
 } from '../src/types/index.js';
+import { supabaseAdmin, assertSupabaseConfigured } from './supabaseAdmin.js';
 
 export const STORE_CONFIG: StoreConfig = {
   name: process.env.STORE_NAME || 'TREND STREET',
@@ -29,827 +32,102 @@ export const STORE_CONFIG: StoreConfig = {
   expressLocalAvailable: true,
 };
 
-const DATA_DIR = path.join(process.cwd(), 'data');
-const DB_FILE = path.join(DATA_DIR, 'store.json');
+const DEFAULT_PAGE_SIZE = 24;
 
-export interface DatabaseState {
-  products: Product[];
-  categories: Category[];
-  collections: Collection[];
-  coupons: Coupon[];
-  orders: Order[];
-  reviews: Review[];
-  inventoryLogs: InventoryLog[];
-  customers: { id: string; name: string; email: string; phone: string; ordersCount: number; totalSpent: number; createdAt: string }[];
+export function slugify(text: string): string {
+  return text
+    .toLowerCase()
+    .trim()
+    .replace(/[^a-z0-9]+/g, '-')
+    .replace(/(^-|-$)/g, '');
 }
 
-const INITIAL_CATEGORIES: Category[] = [
-  {
-    id: 'cat-tshirts',
-    name: 'T-Shirts',
-    slug: 't-shirts',
-    description: 'Heavyweight oversized, drop-shoulder, and raw-edge streetwear essentials.',
-    imageUrl: 'https://images.unsplash.com/photo-1521572267360-ee0c2909d518?auto=format&fit=crop&w=1200&q=85',
-    itemCount: 3,
-  },
-  {
-    id: 'cat-shirts',
-    name: 'Shirts',
-    slug: 'shirts',
-    description: 'Cuban collars, textured linens, and relaxed luxury button-downs.',
-    imageUrl: 'https://images.unsplash.com/photo-1602810318383-e386cc2a3ccf?auto=format&fit=crop&w=1200&q=85',
-    itemCount: 2,
-  },
-  {
-    id: 'cat-jeans',
-    name: 'Jeans',
-    slug: 'jeans',
-    description: 'Japanese selvedge, vintage 90s baggy, and straight-cut premium denims.',
-    imageUrl: 'https://images.unsplash.com/photo-1542272604-780c96856592?auto=format&fit=crop&w=1200&q=85',
-    itemCount: 2,
-  },
-  {
-    id: 'cat-trousers',
-    name: 'Trousers',
-    slug: 'trousers',
-    description: 'Double-pleated tailoring, relaxed drapey cuts, and tactical modular cargos.',
-    imageUrl: 'https://images.unsplash.com/photo-1624378439575-d8705ad7ae80?auto=format&fit=crop&w=1200&q=85',
-    itemCount: 2,
-  },
-  {
-    id: 'cat-jackets',
-    name: 'Jackets',
-    slug: 'jackets',
-    description: 'Minimalist cropped bombers, heavyweight chore overshirts, and utility jackets.',
-    imageUrl: 'https://images.unsplash.com/photo-1551028719-00167b16eac5?auto=format&fit=crop&w=1200&q=85',
-    itemCount: 2,
-  },
-  {
-    id: 'cat-hoodies',
-    name: 'Hoodies',
-    slug: 'hoodies',
-    description: '450 GSM luxury French terry boxy hoodies with no drawstrings.',
-    imageUrl: 'https://images.unsplash.com/photo-1556905055-8f358a7a47b2?auto=format&fit=crop&w=1200&q=85',
-    itemCount: 1,
-  },
-  {
-    id: 'cat-polos',
-    name: 'Polos',
-    slug: 'polos',
-    description: 'Fine-knit mercerized cotton retro collar polos.',
-    imageUrl: 'https://images.unsplash.com/photo-1618354691373-d851c5c3a990?auto=format&fit=crop&w=1200&q=85',
-    itemCount: 1,
-  },
-];
+function mapVariantRow(v: any): ProductVariant {
+  return {
+    id: v.id,
+    productId: v.product_id,
+    title: v.title,
+    sku: v.sku,
+    price: Number(v.price),
+    compareAtPrice: v.compare_at_price != null ? Number(v.compare_at_price) : undefined,
+    color: v.color,
+    colorHex: v.color_hex,
+    size: v.size,
+    stock: v.stock,
+    weightGrams: v.weight_grams ?? undefined,
+  };
+}
 
-const INITIAL_COLLECTIONS: Collection[] = [
-  {
-    id: 'col-summer-drop',
-    name: 'Drop 01: Raw Minimal',
-    slug: 'raw-minimal',
-    description: 'Structured silhouettes in mineral tones, high-density cottons, and neutral undertones.',
-    bannerImage: 'https://images.unsplash.com/photo-1490481651871-ab68de25d43d?auto=format&fit=crop&w=1600&q=85',
-  },
-  {
-    id: 'col-luxury-streetwear',
-    name: 'Modern Streetwear',
-    slug: 'modern-streetwear',
-    description: 'Oversized luxury essentials designed for everyday high-velocity urban life.',
-    bannerImage: 'https://images.unsplash.com/photo-1509631179647-0177331693ae?auto=format&fit=crop&w=1600&q=85',
-  },
-  {
-    id: 'col-monochrome',
-    name: 'Monochrome Luxe',
-    slug: 'monochrome-luxe',
-    description: 'Curated blacks, off-whites, and deep charcoals for a confident modern aesthetic.',
-    bannerImage: 'https://images.unsplash.com/photo-1507679799987-c73779587ccf?auto=format&fit=crop&w=1600&q=85',
-  },
-];
+function mapImageRow(img: any): ProductImage {
+  return {
+    id: img.id,
+    url: img.url,
+    altText: img.alt_text || '',
+    isPrimary: img.is_primary,
+    sortOrder: img.display_order,
+    color: img.color || undefined,
+  };
+}
 
-const INITIAL_PRODUCTS: Product[] = [
-  {
-    id: 'prod-acid-wash-tee',
-    title: 'Heavyweight Acid Wash Boxy Tee',
-    slug: 'heavyweight-acid-wash-boxy-tee',
-    brand: 'TREND STREET',
-    shortDescription: '260 GSM single jersey cotton with artisanal acid wash finish.',
-    description: 'Crafted from 100% premium combed cotton with a high-density 260 GSM weight. Features a dropped shoulder, ribbed 1.25" neck collar that does not bacon, and a subtle vintage acid wash fade. Cut in our signature boxy silhouette.',
-    category: 't-shirts',
-    collection: 'raw-minimal',
-    sku: 'TS-TEE-AW01',
-    basePrice: 1499,
-    compareAtPrice: 2299,
-    discountPercentage: 35,
-    status: 'active',
-    tags: ['Oversized', 'Heavyweight', 'Acid Wash', 'Streetwear', 'Best Seller'],
-    productType: 'Oversized T-Shirt',
-    material: '100% Combed Heavyweight Cotton (260 GSM)',
-    fit: 'Boxy',
-    careInstructions: 'Machine wash cold inside-out. Do not tumble dry. Cool iron avoiding prints.',
-    weightGrams: 320,
-    seoTitle: 'Heavyweight Acid Wash Boxy Tee | TREND STREET Mainpuri',
-    seoDescription: 'Buy premium 260 GSM acid wash oversized t-shirt from TREND STREET. Fast shipping across India.',
-    rating: 4.9,
-    reviewCount: 28,
-    isFeatured: true,
-    isNewArrival: true,
-    isBestSeller: true,
-    isTrending: true,
-    createdAt: new Date('2026-01-10').toISOString(),
-    updatedAt: new Date('2026-03-01').toISOString(),
-    images: [
-      {
-        id: 'img-tee-1',
-        url: 'https://images.unsplash.com/photo-1521572267360-ee0c2909d518?auto=format&fit=crop&w=1200&q=85',
-        altText: 'Heavyweight Acid Wash Boxy Tee front view',
-        isPrimary: true,
-      },
-      {
-        id: 'img-tee-2',
-        url: 'https://images.unsplash.com/photo-1583743814966-8936f5b7be1a?auto=format&fit=crop&w=1200&q=85',
-        altText: 'Heavyweight Acid Wash Boxy Tee side profile',
-      },
-      {
-        id: 'img-tee-3',
-        url: 'https://images.unsplash.com/photo-1503342217505-b0a15ec3261c?auto=format&fit=crop&w=1200&q=85',
-        altText: 'Fabric detail texture 260 GSM',
-      },
-    ],
-    variants: [
-      { id: 'v-tee-blk-s', productId: 'prod-acid-wash-tee', title: 'Vintage Black / S', sku: 'TS-TEE-AW01-BLK-S', price: 1499, compareAtPrice: 2299, color: 'Vintage Black', colorHex: '#1e1e24', size: 'S', stock: 12 },
-      { id: 'v-tee-blk-m', productId: 'prod-acid-wash-tee', title: 'Vintage Black / M', sku: 'TS-TEE-AW01-BLK-M', price: 1499, compareAtPrice: 2299, color: 'Vintage Black', colorHex: '#1e1e24', size: 'M', stock: 18 },
-      { id: 'v-tee-blk-l', productId: 'prod-acid-wash-tee', title: 'Vintage Black / L', sku: 'TS-TEE-AW01-BLK-L', price: 1499, compareAtPrice: 2299, color: 'Vintage Black', colorHex: '#1e1e24', size: 'L', stock: 14 },
-      { id: 'v-tee-blk-xl', productId: 'prod-acid-wash-tee', title: 'Vintage Black / XL', sku: 'TS-TEE-AW01-BLK-XL', price: 1499, compareAtPrice: 2299, color: 'Vintage Black', colorHex: '#1e1e24', size: 'XL', stock: 8 },
-      { id: 'v-tee-gry-m', productId: 'prod-acid-wash-tee', title: 'Washed Grey / M', sku: 'TS-TEE-AW01-GRY-M', price: 1499, compareAtPrice: 2299, color: 'Washed Grey', colorHex: '#4b5563', size: 'M', stock: 15 },
-      { id: 'v-tee-gry-l', productId: 'prod-acid-wash-tee', title: 'Washed Grey / L', sku: 'TS-TEE-AW01-GRY-L', price: 1499, compareAtPrice: 2299, color: 'Washed Grey', colorHex: '#4b5563', size: 'L', stock: 10 },
-    ],
-  },
-  {
-    id: 'prod-cuban-linen-shirt',
-    title: 'Cuban Collar Textured Linen Shirt',
-    slug: 'cuban-collar-textured-linen-shirt',
-    brand: 'TREND STREET',
-    shortDescription: '100% French linen blend with natural drape and custom horn buttons.',
-    description: 'The definitive summer staple. Tailored with a relaxed camp collar, straight vented hem for untucked styling, and a breathable open-weave linen texture that softens beautifully with every wear. Finished with mother-of-pearl effect tonal buttons.',
-    category: 'shirts',
-    collection: 'raw-minimal',
-    sku: 'TS-SHIRT-LN02',
-    basePrice: 2299,
-    compareAtPrice: 3499,
-    discountPercentage: 34,
-    status: 'active',
-    tags: ['Linen', 'Resort', 'Camp Collar', 'Relaxed', 'Summer'],
-    productType: 'Casual Shirt',
-    material: '70% French Linen, 30% Long-Staple Cotton',
-    fit: 'Relaxed',
-    careInstructions: 'Dry clean recommended or gentle cold hand wash. Dry in shade.',
-    weightGrams: 280,
-    seoTitle: 'Cuban Collar Textured Linen Shirt | TREND STREET',
-    seoDescription: 'Shop luxury relaxed Cuban collar linen shirts at TREND STREET Mainpuri. Premium breathable fabrics.',
-    rating: 4.8,
-    reviewCount: 19,
-    isFeatured: true,
-    isNewArrival: true,
-    isBestSeller: false,
-    isTrending: true,
-    createdAt: new Date('2026-01-15').toISOString(),
-    updatedAt: new Date('2026-03-02').toISOString(),
-    images: [
-      {
-        id: 'img-shirt-1',
-        url: 'https://images.unsplash.com/photo-1602810318383-e386cc2a3ccf?auto=format&fit=crop&w=1200&q=85',
-        altText: 'Cuban Collar Textured Linen Shirt in Sand Beige',
-        isPrimary: true,
-      },
-      {
-        id: 'img-shirt-2',
-        url: 'https://images.unsplash.com/photo-1596755094514-f87e34085b2c?auto=format&fit=crop&w=1200&q=85',
-        altText: 'Linen shirt texture close-up',
-      },
-    ],
-    variants: [
-      { id: 'v-sh-sand-s', productId: 'prod-cuban-linen-shirt', title: 'Sand Beige / S', sku: 'TS-SHIRT-LN02-SND-S', price: 2299, compareAtPrice: 3499, color: 'Sand Beige', colorHex: '#d7c4b7', size: 'S', stock: 6 },
-      { id: 'v-sh-sand-m', productId: 'prod-cuban-linen-shirt', title: 'Sand Beige / M', sku: 'TS-SHIRT-LN02-SND-M', price: 2299, compareAtPrice: 3499, color: 'Sand Beige', colorHex: '#d7c4b7', size: 'M', stock: 12 },
-      { id: 'v-sh-sand-l', productId: 'prod-cuban-linen-shirt', title: 'Sand Beige / L', sku: 'TS-SHIRT-LN02-SND-L', price: 2299, compareAtPrice: 3499, color: 'Sand Beige', colorHex: '#d7c4b7', size: 'L', stock: 9 },
-      { id: 'v-sh-sand-xl', productId: 'prod-cuban-linen-shirt', title: 'Sand Beige / XL', sku: 'TS-SHIRT-LN02-SND-XL', price: 2299, compareAtPrice: 3499, color: 'Sand Beige', colorHex: '#d7c4b7', size: 'XL', stock: 4 },
-      { id: 'v-sh-blk-m', productId: 'prod-cuban-linen-shirt', title: 'Raven Black / M', sku: 'TS-SHIRT-LN02-BLK-M', price: 2299, compareAtPrice: 3499, color: 'Raven Black', colorHex: '#121214', size: 'M', stock: 10 },
-      { id: 'v-sh-blk-l', productId: 'prod-cuban-linen-shirt', title: 'Raven Black / L', sku: 'TS-SHIRT-LN02-BLK-L', price: 2299, compareAtPrice: 3499, color: 'Raven Black', colorHex: '#121214', size: 'L', stock: 8 },
-    ],
-  },
-  {
-    id: 'prod-selvedge-jeans',
-    title: 'Japanese Raw Selvedge Straight Jeans',
-    slug: 'japanese-raw-selvedge-straight-jeans',
-    brand: 'TREND STREET',
-    shortDescription: '14.5 oz heavy raw selvedge denim with red ID ticker line.',
-    description: 'Woven on vintage shuttle looms using 100% long-staple ring-spun cotton. Pure indigo-dyed yarn that develops unique personalized fades and whiskering over time. Classic mid-rise straight leg cut with copper hardware and debossed leather backpatch.',
-    category: 'jeans',
-    collection: 'modern-streetwear',
-    sku: 'TS-JEAN-SLV03',
-    basePrice: 3499,
-    compareAtPrice: 4999,
-    discountPercentage: 30,
-    status: 'active',
-    tags: ['Raw Denim', 'Selvedge', 'Straight Fit', 'Indigo', 'Premium'],
-    productType: 'Jeans',
-    material: '100% Cotton 14.5oz Raw Selvedge Denim',
-    fit: 'Regular',
-    careInstructions: 'Soak inside-out in cold water. Hang dry. Avoid washing for first 3-6 months for best natural fading.',
-    weightGrams: 750,
-    seoTitle: 'Japanese Raw Selvedge Straight Jeans | TREND STREET',
-    seoDescription: '14.5oz raw selvedge denim straight cut jeans. Crafted for longevity and authentic fading.',
-    rating: 5.0,
-    reviewCount: 34,
-    isFeatured: true,
-    isNewArrival: false,
-    isBestSeller: true,
-    isTrending: false,
-    createdAt: new Date('2026-01-05').toISOString(),
-    updatedAt: new Date('2026-02-28').toISOString(),
-    images: [
-      {
-        id: 'img-jean-1',
-        url: 'https://images.unsplash.com/photo-1542272604-780c96856592?auto=format&fit=crop&w=1200&q=85',
-        altText: 'Raw Selvedge Straight Jeans front profile',
-        isPrimary: true,
-      },
-      {
-        id: 'img-jean-2',
-        url: 'https://images.unsplash.com/photo-1541099649105-f69ad21f3246?auto=format&fit=crop&w=1200&q=85',
-        altText: 'Raw denim selvedge cuff detail',
-      },
-    ],
-    variants: [
-      { id: 'v-jn-ind-30', productId: 'prod-selvedge-jeans', title: 'Raw Indigo / S (30)', sku: 'TS-JEAN-SLV03-30', price: 3499, compareAtPrice: 4999, color: 'Raw Indigo', colorHex: '#1e293b', size: 'S', stock: 8 },
-      { id: 'v-jn-ind-32', productId: 'prod-selvedge-jeans', title: 'Raw Indigo / M (32)', sku: 'TS-JEAN-SLV03-32', price: 3499, compareAtPrice: 4999, color: 'Raw Indigo', colorHex: '#1e293b', size: 'M', stock: 15 },
-      { id: 'v-jn-ind-34', productId: 'prod-selvedge-jeans', title: 'Raw Indigo / L (34)', sku: 'TS-JEAN-SLV03-34', price: 3499, compareAtPrice: 4999, color: 'Raw Indigo', colorHex: '#1e293b', size: 'L', stock: 11 },
-      { id: 'v-jn-ind-36', productId: 'prod-selvedge-jeans', title: 'Raw Indigo / XL (36)', sku: 'TS-JEAN-SLV03-36', price: 3499, compareAtPrice: 4999, color: 'Raw Indigo', colorHex: '#1e293b', size: 'XL', stock: 6 },
-    ],
-  },
-  {
-    id: 'prod-pleated-trousers',
-    title: 'Double Pleated Wide-Leg Wool Trousers',
-    slug: 'double-pleated-wide-leg-wool-trousers',
-    brand: 'TREND STREET',
-    shortDescription: 'Tailored drape with double front pleats and concealed side adjusters.',
-    description: 'An architectural silhouette designed for modern sartorial street style. Crafted from high-twist tropical wool blend with a heavy fluid drape that stacks cleanly over sneakers or dress loafers. Features bespoke internal waistband curtain and deep pockets.',
-    category: 'trousers',
-    collection: 'monochrome-luxe',
-    sku: 'TS-TRS-PL04',
-    basePrice: 2899,
-    compareAtPrice: 4199,
-    discountPercentage: 31,
-    status: 'active',
-    tags: ['Tailored', 'Pleated', 'Wide Leg', 'Minimalist', 'Luxe'],
-    productType: 'Trousers',
-    material: '55% Tropical Wool, 43% Polyester, 2% Elastane',
-    fit: 'Relaxed',
-    careInstructions: 'Dry clean only. Cool iron with pressing cloth.',
-    weightGrams: 460,
-    seoTitle: 'Double Pleated Wide-Leg Trousers | TREND STREET',
-    seoDescription: 'Shop tailored double-pleated wide leg trousers for men. Premium fluid drape cut.',
-    rating: 4.9,
-    reviewCount: 22,
-    isFeatured: true,
-    isNewArrival: true,
-    isBestSeller: true,
-    isTrending: true,
-    createdAt: new Date('2026-01-20').toISOString(),
-    updatedAt: new Date('2026-03-03').toISOString(),
-    images: [
-      {
-        id: 'img-trs-1',
-        url: 'https://images.unsplash.com/photo-1624378439575-d8705ad7ae80?auto=format&fit=crop&w=1200&q=85',
-        altText: 'Double Pleated Wide-Leg Trousers Charcoal',
-        isPrimary: true,
-      },
-      {
-        id: 'img-trs-2',
-        url: 'https://images.unsplash.com/photo-1594938298603-c8148c4dae35?auto=format&fit=crop&w=1200&q=85',
-        altText: 'Pleat and waistband construction detail',
-      },
-    ],
-    variants: [
-      { id: 'v-tr-ch-s', productId: 'prod-pleated-trousers', title: 'Charcoal Grey / S', sku: 'TS-TRS-PL04-CH-S', price: 2899, compareAtPrice: 4199, color: 'Charcoal Grey', colorHex: '#334155', size: 'S', stock: 7 },
-      { id: 'v-tr-ch-m', productId: 'prod-pleated-trousers', title: 'Charcoal Grey / M', sku: 'TS-TRS-PL04-CH-M', price: 2899, compareAtPrice: 4199, color: 'Charcoal Grey', colorHex: '#334155', size: 'M', stock: 14 },
-      { id: 'v-tr-ch-l', productId: 'prod-pleated-trousers', title: 'Charcoal Grey / L', sku: 'TS-TRS-PL04-CH-L', price: 2899, compareAtPrice: 4199, color: 'Charcoal Grey', colorHex: '#334155', size: 'L', stock: 9 },
-      { id: 'v-tr-blk-m', productId: 'prod-pleated-trousers', title: 'Matte Black / M', sku: 'TS-TRS-PL04-BLK-M', price: 2899, compareAtPrice: 4199, color: 'Matte Black', colorHex: '#0f172a', size: 'M', stock: 12 },
-      { id: 'v-tr-blk-l', productId: 'prod-pleated-trousers', title: 'Matte Black / L', sku: 'TS-TRS-PL04-BLK-L', price: 2899, compareAtPrice: 4199, color: 'Matte Black', colorHex: '#0f172a', size: 'L', stock: 10 },
-    ],
-  },
-  {
-    id: 'prod-french-terry-hoodie',
-    title: '450 GSM Heavy French Terry Boxy Hoodie',
-    slug: '450-gsm-heavy-french-terry-boxy-hoodie',
-    brand: 'TREND STREET',
-    shortDescription: 'Ultra-heavy unbrushed loopback cotton with double-layer crossover hood.',
-    description: 'Engineered without compromise. Weighing a substantial 450 grams per square meter, this hoodie delivers structured drape, drop shoulders, zero-drawstring clean neckline, and blind stitching. Ribbed 2x2 heavy side gussets provide unrestricted movement.',
-    category: 'hoodies',
-    collection: 'modern-streetwear',
-    sku: 'TS-HD-FT05',
-    basePrice: 2999,
-    compareAtPrice: 4499,
-    discountPercentage: 33,
-    status: 'active',
-    tags: ['450 GSM', 'French Terry', 'Heavyweight', 'Boxy Hoodie', 'Drop 01'],
-    productType: 'Hoodie',
-    material: '100% Organic Loopback French Terry (450 GSM)',
-    fit: 'Boxy',
-    careInstructions: 'Machine wash cold inside-out. Do not bleach. Air dry flat.',
-    weightGrams: 850,
-    seoTitle: '450 GSM Heavy French Terry Boxy Hoodie | TREND STREET',
-    seoDescription: 'The ultimate luxury boxy hoodie in 450 GSM heavyweight cotton. Available online and in Mainpuri store.',
-    rating: 4.9,
-    reviewCount: 41,
-    isFeatured: true,
-    isNewArrival: true,
-    isBestSeller: true,
-    isTrending: true,
-    createdAt: new Date('2026-01-08').toISOString(),
-    updatedAt: new Date('2026-03-04').toISOString(),
-    images: [
-      {
-        id: 'img-hd-1',
-        url: 'https://images.unsplash.com/photo-1556905055-8f358a7a47b2?auto=format&fit=crop&w=1200&q=85',
-        altText: '450 GSM Heavy French Terry Boxy Hoodie in Carbon Black',
-        isPrimary: true,
-      },
-      {
-        id: 'img-hd-2',
-        url: 'https://images.unsplash.com/photo-1543163521-1bf539c55dd2?auto=format&fit=crop&w=1200&q=85',
-        altText: 'Hoodie fit and double-layer hood detail',
-      },
-    ],
-    variants: [
-      { id: 'v-hd-blk-s', productId: 'prod-french-terry-hoodie', title: 'Carbon Black / S', sku: 'TS-HD-FT05-BLK-S', price: 2999, compareAtPrice: 4499, color: 'Carbon Black', colorHex: '#171717', size: 'S', stock: 5 },
-      { id: 'v-hd-blk-m', productId: 'prod-french-terry-hoodie', title: 'Carbon Black / M', sku: 'TS-HD-FT05-BLK-M', price: 2999, compareAtPrice: 4499, color: 'Carbon Black', colorHex: '#171717', size: 'M', stock: 16 },
-      { id: 'v-hd-blk-l', productId: 'prod-french-terry-hoodie', title: 'Carbon Black / L', sku: 'TS-HD-FT05-BLK-L', price: 2999, compareAtPrice: 4499, color: 'Carbon Black', colorHex: '#171717', size: 'L', stock: 14 },
-      { id: 'v-hd-blk-xl', productId: 'prod-french-terry-hoodie', title: 'Carbon Black / XL', sku: 'TS-HD-FT05-BLK-XL', price: 2999, compareAtPrice: 4499, color: 'Carbon Black', colorHex: '#171717', size: 'XL', stock: 9 },
-      { id: 'v-hd-bone-m', productId: 'prod-french-terry-hoodie', title: 'Bone White / M', sku: 'TS-HD-FT05-BON-M', price: 2999, compareAtPrice: 4499, color: 'Bone White', colorHex: '#e4e4e7', size: 'M', stock: 11 },
-      { id: 'v-hd-bone-l', productId: 'prod-french-terry-hoodie', title: 'Bone White / L', sku: 'TS-HD-FT05-BON-L', price: 2999, compareAtPrice: 4499, color: 'Bone White', colorHex: '#e4e4e7', size: 'L', stock: 7 },
-    ],
-  },
-  {
-    id: 'prod-utility-bomber',
-    title: 'Cropped Minimalist Utility Bomber',
-    slug: 'cropped-minimalist-utility-bomber',
-    brand: 'TREND STREET',
-    shortDescription: 'Water-repellent matte twill with tonal 2-way YKK zip and storm flap.',
-    description: 'A cropped high-fashion silhouette with voluminous sleeves and dropped shoulders. Features insulated diamond quilted lining, concealed arm flight pocket, interior chest pocket, and heavyweight elasticated wool-rib collar and cuffs.',
-    category: 'jackets',
-    collection: 'raw-minimal',
-    sku: 'TS-JKT-BMB06',
-    basePrice: 4499,
-    compareAtPrice: 6999,
-    discountPercentage: 35,
-    status: 'active',
-    tags: ['Bomber', 'Cropped', 'Outerwear', 'YKK', 'Water-Repellent'],
-    productType: 'Jacket',
-    material: 'High-Density Matte Nylon Twill with Diamond Quilted Satin Lining',
-    fit: 'Boxy',
-    careInstructions: 'Specialist dry clean only.',
-    weightGrams: 920,
-    seoTitle: 'Cropped Minimalist Utility Bomber | TREND STREET',
-    seoDescription: 'Shop designer cropped utility bomber jackets from TREND STREET. Premium luxury streetwear.',
-    rating: 4.9,
-    reviewCount: 16,
-    isFeatured: true,
-    isNewArrival: true,
-    isBestSeller: false,
-    isTrending: true,
-    createdAt: new Date('2026-01-25').toISOString(),
-    updatedAt: new Date('2026-03-05').toISOString(),
-    images: [
-      {
-        id: 'img-jkt-1',
-        url: 'https://images.unsplash.com/photo-1551028719-00167b16eac5?auto=format&fit=crop&w=1200&q=85',
-        altText: 'Cropped Minimalist Utility Bomber front view',
-        isPrimary: true,
-      },
-      {
-        id: 'img-jkt-2',
-        url: 'https://images.unsplash.com/photo-1548883354-7622d03aca27?auto=format&fit=crop&w=1200&q=85',
-        altText: 'Utility bomber sleeve and hardware detail',
-      },
-    ],
-    variants: [
-      { id: 'v-bmb-olv-m', productId: 'prod-utility-bomber', title: 'Washed Olive / M', sku: 'TS-JKT-BMB06-OLV-M', price: 4499, compareAtPrice: 6999, color: 'Washed Olive', colorHex: '#3f4f3a', size: 'M', stock: 8 },
-      { id: 'v-bmb-olv-l', productId: 'prod-utility-bomber', title: 'Washed Olive / L', sku: 'TS-JKT-BMB06-OLV-L', price: 4499, compareAtPrice: 6999, color: 'Washed Olive', colorHex: '#3f4f3a', size: 'L', stock: 6 },
-      { id: 'v-bmb-blk-m', productId: 'prod-utility-bomber', title: 'Stealth Black / M', sku: 'TS-JKT-BMB06-BLK-M', price: 4499, compareAtPrice: 6999, color: 'Stealth Black', colorHex: '#09090b', size: 'M', stock: 10 },
-      { id: 'v-bmb-blk-l', productId: 'prod-utility-bomber', title: 'Stealth Black / L', sku: 'TS-JKT-BMB06-BLK-L', price: 4499, compareAtPrice: 6999, color: 'Stealth Black', colorHex: '#09090b', size: 'L', stock: 7 },
-    ],
-  },
-  {
-    id: 'prod-tactical-cargos',
-    title: 'Modular Wide-Leg Tactical Cargo Pants',
-    slug: 'modular-wide-leg-tactical-cargo-pants',
-    brand: 'TREND STREET',
-    shortDescription: 'Reinforced cotton ripstop with articulated knees and bungee hem adjusters.',
-    description: 'Built for functionality without sacrificing street aesthetic. Cut with relaxed leg volume, 6-pocket tactical array with hidden magnetic closures, reinforced seat, and elastic drawcord cuffs allowing switch between wide-leg and stacked jogger silhouette.',
-    category: 'trousers',
-    collection: 'modern-streetwear',
-    sku: 'TS-TRS-CRG07',
-    basePrice: 2799,
-    compareAtPrice: 3999,
-    discountPercentage: 30,
-    status: 'active',
-    tags: ['Cargo', 'Ripstop', 'Wide Leg', 'Tactical', 'Streetwear'],
-    productType: 'Cargo Pants',
-    material: '100% Military Grade Cotton Ripstop (310 GSM)',
-    fit: 'Relaxed',
-    careInstructions: 'Machine wash cold with like colors. Line dry.',
-    weightGrams: 580,
-    seoTitle: 'Modular Wide-Leg Tactical Cargo Pants | TREND STREET',
-    seoDescription: 'Heavy-duty tactical cargo pants with modular bungee hems. Available at TREND STREET.',
-    rating: 4.8,
-    reviewCount: 25,
-    isFeatured: false,
-    isNewArrival: false,
-    isBestSeller: true,
-    isTrending: true,
-    createdAt: new Date('2026-01-12').toISOString(),
-    updatedAt: new Date('2026-03-01').toISOString(),
-    images: [
-      {
-        id: 'img-crg-1',
-        url: 'https://images.unsplash.com/photo-1517445312882-bc9910d016b7?auto=format&fit=crop&w=1200&q=85',
-        altText: 'Modular Wide-Leg Tactical Cargo Pants in Stealth Black',
-        isPrimary: true,
-      },
-    ],
-    variants: [
-      { id: 'v-crg-blk-s', productId: 'prod-tactical-cargos', title: 'Stealth Black / S', sku: 'TS-TRS-CRG07-BLK-S', price: 2799, compareAtPrice: 3999, color: 'Stealth Black', colorHex: '#18181b', size: 'S', stock: 9 },
-      { id: 'v-crg-blk-m', productId: 'prod-tactical-cargos', title: 'Stealth Black / M', sku: 'TS-TRS-CRG07-BLK-M', price: 2799, compareAtPrice: 3999, color: 'Stealth Black', colorHex: '#18181b', size: 'M', stock: 15 },
-      { id: 'v-crg-blk-l', productId: 'prod-tactical-cargos', title: 'Stealth Black / L', sku: 'TS-TRS-CRG07-BLK-L', price: 2799, compareAtPrice: 3999, color: 'Stealth Black', colorHex: '#18181b', size: 'L', stock: 12 },
-      { id: 'v-crg-olv-m', productId: 'prod-tactical-cargos', title: 'Olive Drab / M', sku: 'TS-TRS-CRG07-OLV-M', price: 2799, compareAtPrice: 3999, color: 'Olive Drab', colorHex: '#3f4f3a', size: 'M', stock: 10 },
-      { id: 'v-crg-olv-l', productId: 'prod-tactical-cargos', title: 'Olive Drab / L', sku: 'TS-TRS-CRG07-OLV-L', price: 2799, compareAtPrice: 3999, color: 'Olive Drab', colorHex: '#3f4f3a', size: 'L', stock: 8 },
-    ],
-  },
-  {
-    id: 'prod-knit-polo',
-    title: 'Mercerized Ribbed Knit Relaxed Polo',
-    slug: 'mercerized-ribbed-knit-relaxed-polo',
-    brand: 'TREND STREET',
-    shortDescription: 'Ultra-soft long-staple combed cotton knit with Johnny collar neckline.',
-    description: 'Elevated minimalism. Knitted with ultra-fine 14-gauge mercerized yarn that offers a subtle natural sheen, wrinkle resistance, and thermal comfort. Seamless open collar with ribbed hem cuffs that sit neatly at the waistline.',
-    category: 'polos',
-    collection: 'monochrome-luxe',
-    sku: 'TS-POLO-MR08',
-    basePrice: 2199,
-    compareAtPrice: 3199,
-    discountPercentage: 31,
-    status: 'active',
-    tags: ['Knit Polo', 'Mercerized Cotton', 'Minimalist', 'Luxe'],
-    productType: 'Polo Shirt',
-    material: '100% Mercerized Combed Cotton',
-    fit: 'Relaxed',
-    careInstructions: 'Hand wash cold or gentle machine wash inside mesh bag. Dry flat.',
-    weightGrams: 310,
-    seoTitle: 'Mercerized Ribbed Knit Relaxed Polo | TREND STREET',
-    seoDescription: 'Buy luxury knit polos in mercerized cotton from TREND STREET. Premium Indian craftsmanship.',
-    rating: 4.7,
-    reviewCount: 14,
-    isFeatured: false,
-    isNewArrival: true,
-    isBestSeller: false,
-    isTrending: false,
-    createdAt: new Date('2026-02-01').toISOString(),
-    updatedAt: new Date('2026-03-02').toISOString(),
-    images: [
-      {
-        id: 'img-polo-1',
-        url: 'https://images.unsplash.com/photo-1618354691373-d851c5c3a990?auto=format&fit=crop&w=1200&q=85',
-        altText: 'Mercerized Ribbed Knit Relaxed Polo in Ecru Cream',
-        isPrimary: true,
-      },
-    ],
-    variants: [
-      { id: 'v-plo-ecr-s', productId: 'prod-knit-polo', title: 'Ecru Cream / S', sku: 'TS-POLO-MR08-ECR-S', price: 2199, compareAtPrice: 3199, color: 'Ecru Cream', colorHex: '#f4f1ea', size: 'S', stock: 6 },
-      { id: 'v-plo-ecr-m', productId: 'prod-knit-polo', title: 'Ecru Cream / M', sku: 'TS-POLO-MR08-ECR-M', price: 2199, compareAtPrice: 3199, color: 'Ecru Cream', colorHex: '#f4f1ea', size: 'M', stock: 12 },
-      { id: 'v-plo-ecr-l', productId: 'prod-knit-polo', title: 'Ecru Cream / L', sku: 'TS-POLO-MR08-ECR-L', price: 2199, compareAtPrice: 3199, color: 'Ecru Cream', colorHex: '#f4f1ea', size: 'L', stock: 8 },
-      { id: 'v-plo-nvy-m', productId: 'prod-knit-polo', title: 'Deep Navy / M', sku: 'TS-POLO-MR08-NVY-M', price: 2199, compareAtPrice: 3199, color: 'Deep Navy', colorHex: '#1e3a8a', size: 'M', stock: 10 },
-      { id: 'v-plo-nvy-l', productId: 'prod-knit-polo', title: 'Deep Navy / L', sku: 'TS-POLO-MR08-NVY-L', price: 2199, compareAtPrice: 3199, color: 'Deep Navy', colorHex: '#1e3a8a', size: 'L', stock: 6 },
-    ],
-  },
-];
+function mapProductRow(row: any): Product {
+  // Product-level/fallback images (color undefined) always sort first, so
+  // existing callers that assume images[0] is "the" thumbnail (ProductCard,
+  // admin table, cart, wishlist) keep working unchanged even after
+  // color-specific images are added. Within that, display_order is preserved.
+  const images: ProductImage[] = (row.product_images || [])
+    .map(mapImageRow)
+    .sort((a: ProductImage, b: ProductImage) => {
+      const aHasColor = a.color ? 1 : 0;
+      const bHasColor = b.color ? 1 : 0;
+      if (aHasColor !== bHasColor) return aHasColor - bHasColor;
+      return (a.sortOrder ?? 0) - (b.sortOrder ?? 0);
+    });
 
-const INITIAL_COUPONS: Coupon[] = [
-  {
-    id: 'coup-trend10',
-    code: 'TREND10',
-    type: 'percentage',
-    value: 10,
-    minimumOrder: 1500,
-    maximumDiscount: 500,
-    startDate: new Date('2026-01-01').toISOString(),
-    expiryDate: new Date('2026-12-31').toISOString(),
-    usageLimit: 1000,
-    usedCount: 84,
-    perUserLimit: 1,
-    isActive: true,
-    description: 'Get 10% off on orders above ₹1,499 (Max discount ₹500)',
-  },
-  {
-    id: 'coup-street500',
-    code: 'STREET500',
-    type: 'fixed',
-    value: 500,
-    minimumOrder: 2999,
-    maximumDiscount: 500,
-    startDate: new Date('2026-01-01').toISOString(),
-    expiryDate: new Date('2026-12-31').toISOString(),
-    usageLimit: 500,
-    usedCount: 42,
-    perUserLimit: 1,
-    isActive: true,
-    description: 'Flat ₹500 off on your purchase above ₹2,999',
-  },
-  {
-    id: 'coup-welcome15',
-    code: 'WELCOME15',
-    type: 'percentage',
-    value: 15,
-    minimumOrder: 1999,
-    maximumDiscount: 600,
-    startDate: new Date('2026-01-01').toISOString(),
-    expiryDate: new Date('2026-12-31').toISOString(),
-    usageLimit: 2000,
-    usedCount: 112,
-    perUserLimit: 1,
-    isActive: true,
-    description: 'Welcome perk: 15% off on first luxury street haul above ₹1,999',
-  },
-];
+  return {
+    id: row.id,
+    title: row.title,
+    slug: row.slug,
+    brand: row.brand,
+    shortDescription: row.short_description || '',
+    description: row.description,
+    category: row.categories?.slug || '',
+    subcategory: row.subcategory || undefined,
+    gender: row.gender || 'men',
+    collection: row.collections?.slug || undefined,
+    images,
+    videoUrl: row.video_url || undefined,
+    sku: row.sku,
+    basePrice: Number(row.base_price),
+    compareAtPrice: row.compare_at_price != null ? Number(row.compare_at_price) : undefined,
+    discountPercentage: row.discount_percentage || 0,
+    status: row.status,
+    tags: row.tags || [],
+    productType: row.product_type || '',
+    material: row.material || '',
+    fit: row.fit,
+    careInstructions: row.care_instructions || '',
+    weightGrams: row.weight_grams,
+    seoTitle: row.seo_title || undefined,
+    seoDescription: row.seo_description || undefined,
+    variants: (row.product_variants || []).map(mapVariantRow),
+    rating: Number(row.rating),
+    reviewCount: row.review_count,
+    isFeatured: row.is_featured,
+    isNewArrival: row.is_new_arrival,
+    isBestSeller: row.is_best_seller,
+    isTrending: row.is_trending,
+    createdAt: row.created_at,
+    updatedAt: row.updated_at,
+  };
+}
 
-const INITIAL_REVIEWS: Review[] = [
-  {
-    id: 'rev-1',
-    productId: 'prod-acid-wash-tee',
-    userName: 'Vikram Singh',
-    userEmail: 'vikram.s@example.com',
-    rating: 5,
-    title: 'The fabric density is unreal',
-    comment: 'Ordered from Lucknow. The 260 GSM weight gives that heavy structural drape you usually only find on high-end international drops. Neckline stays firm after three washes.',
-    isVerifiedPurchase: true,
-    isApproved: true,
-    createdAt: new Date('2026-02-14').toISOString(),
-  },
-  {
-    id: 'rev-2',
-    productId: 'prod-acid-wash-tee',
-    userName: 'Aman Agarwal',
-    userEmail: 'aman.a@example.com',
-    rating: 5,
-    title: 'Visited the Mainpuri store in person',
-    comment: 'Proud to see a homegrown UP brand doing luxury fashion at this standard. Purchased the Vintage Black in Size L directly at the Mainpuri store. Fits immaculate.',
-    isVerifiedPurchase: true,
-    isApproved: true,
-    createdAt: new Date('2026-02-20').toISOString(),
-  },
-  {
-    id: 'rev-3',
-    productId: 'prod-selvedge-jeans',
-    userName: 'Kabir Mehta',
-    userEmail: 'kabir.m@example.com',
-    rating: 5,
-    title: 'Authentic red-line selvedge',
-    comment: 'The 14.5oz raw denim is stiff at first as it should be, but molds into your body after a week. True Japanese aesthetic.',
-    isVerifiedPurchase: true,
-    isApproved: true,
-    createdAt: new Date('2026-02-28').toISOString(),
-  },
-];
-
-const INITIAL_ORDERS: Order[] = [
-  {
-    id: 'ord-1001',
-    orderNumber: 'TS-2026-000101',
-    customerId: 'cust-1',
-    customerName: 'Rahul Verma',
-    customerEmail: 'rahul.verma@example.com',
-    customerPhone: '+91 98980 11223',
-    shippingAddress: {
-      fullName: 'Rahul Verma',
-      mobile: '+91 98980 11223',
-      email: 'rahul.verma@example.com',
-      addressLine1: 'Flat 402, Royal Residency',
-      apartmentSuiteArea: 'Civil Lines',
-      city: 'Mainpuri',
-      state: 'Uttar Pradesh',
-      pincode: '205001',
-      landmark: 'Near Railway Station',
-    },
-    items: [
-      {
-        id: 'oi-1',
-        productId: 'prod-acid-wash-tee',
-        variantId: 'v-tee-blk-l',
-        title: 'Heavyweight Acid Wash Boxy Tee',
-        variantTitle: 'Vintage Black / L',
-        sku: 'TS-TEE-AW01-BLK-L',
-        color: 'Vintage Black',
-        size: 'L',
-        price: 1499,
-        quantity: 1,
-        image: 'https://images.unsplash.com/photo-1521572267360-ee0c2909d518?auto=format&fit=crop&w=600&q=80',
-        total: 1499,
-      },
-      {
-        id: 'oi-2',
-        productId: 'prod-cuban-linen-shirt',
-        variantId: 'v-sh-sand-l',
-        title: 'Cuban Collar Textured Linen Shirt',
-        variantTitle: 'Sand Beige / L',
-        sku: 'TS-SHIRT-LN02-SND-L',
-        color: 'Sand Beige',
-        size: 'L',
-        price: 2299,
-        quantity: 1,
-        image: 'https://images.unsplash.com/photo-1602810318383-e386cc2a3ccf?auto=format&fit=crop&w=600&q=80',
-        total: 2299,
-      },
-    ],
-    subtotal: 3798,
-    discount: 500,
-    couponCode: 'STREET500',
-    shippingCharge: 0,
-    taxAmount: 164.9,
-    grandTotal: 3462.9,
-    paymentMethod: 'RAZORPAY',
-    paymentStatus: 'PAID',
-    orderStatus: 'DELIVERED',
-    razorpayOrderId: 'order_test_TS101',
-    razorpayPaymentId: 'pay_test_TS101_confirmed',
-    statusHistory: [
-      { status: 'PENDING', timestamp: new Date('2026-02-10T10:00:00Z').toISOString() },
-      { status: 'CONFIRMED', timestamp: new Date('2026-02-10T10:05:00Z').toISOString(), note: 'Payment verified via Razorpay' },
-      { status: 'PACKED', timestamp: new Date('2026-02-10T14:30:00Z').toISOString(), note: 'Dispatched from Mainpuri flagship store hub' },
-      { status: 'SHIPPED', timestamp: new Date('2026-02-11T09:00:00Z').toISOString() },
-      { status: 'DELIVERED', timestamp: new Date('2026-02-12T16:20:00Z').toISOString(), note: 'Delivered to customer' },
-    ],
-    createdAt: new Date('2026-02-10T10:00:00Z').toISOString(),
-    updatedAt: new Date('2026-02-12T16:20:00Z').toISOString(),
-  },
-  {
-    id: 'ord-1002',
-    orderNumber: 'TS-2026-000102',
-    customerId: 'cust-2',
-    customerName: 'Siddharth Roy',
-    customerEmail: 'siddharth.roy@example.com',
-    customerPhone: '+91 97112 34567',
-    shippingAddress: {
-      fullName: 'Siddharth Roy',
-      mobile: '+91 97112 34567',
-      email: 'siddharth.roy@example.com',
-      addressLine1: 'B-12, Sector 62',
-      apartmentSuiteArea: 'Noida',
-      city: 'Gautam Buddha Nagar',
-      state: 'Uttar Pradesh',
-      pincode: '201301',
-    },
-    items: [
-      {
-        id: 'oi-3',
-        productId: 'prod-french-terry-hoodie',
-        variantId: 'v-hd-blk-m',
-        title: '450 GSM Heavy French Terry Boxy Hoodie',
-        variantTitle: 'Carbon Black / M',
-        sku: 'TS-HD-FT05-BLK-M',
-        color: 'Carbon Black',
-        size: 'M',
-        price: 2999,
-        quantity: 1,
-        image: 'https://images.unsplash.com/photo-1556905055-8f358a7a47b2?auto=format&fit=crop&w=600&q=80',
-        total: 2999,
-      },
-    ],
-    subtotal: 2999,
-    discount: 299.9,
-    couponCode: 'TREND10',
-    shippingCharge: 0,
-    taxAmount: 134.95,
-    grandTotal: 2834.05,
-    paymentMethod: 'COD',
-    paymentStatus: 'PENDING',
-    orderStatus: 'SHIPPED',
-    statusHistory: [
-      { status: 'PENDING', timestamp: new Date('2026-03-01T12:00:00Z').toISOString() },
-      { status: 'CONFIRMED', timestamp: new Date('2026-03-01T12:30:00Z').toISOString(), note: 'Customer confirmed via OTP/Phone' },
-      { status: 'PACKED', timestamp: new Date('2026-03-01T17:00:00Z').toISOString() },
-      { status: 'SHIPPED', timestamp: new Date('2026-03-02T10:00:00Z').toISOString(), note: 'In transit via Bluedart Express' },
-    ],
-    createdAt: new Date('2026-03-01T12:00:00Z').toISOString(),
-    updatedAt: new Date('2026-03-02T10:00:00Z').toISOString(),
-  },
-];
-
-const INITIAL_INVENTORY_LOGS: InventoryLog[] = [
-  {
-    id: 'inv-1',
-    productId: 'prod-acid-wash-tee',
-    productTitle: 'Heavyweight Acid Wash Boxy Tee',
-    variantId: 'v-tee-blk-l',
-    variantTitle: 'Vintage Black / L',
-    oldStock: 15,
-    newStock: 14,
-    change: -1,
-    reason: 'ORDER_PLACED',
-    admin: 'System (Order TS-2026-000101)',
-    timestamp: new Date('2026-02-10T10:05:00Z').toISOString(),
-  },
-  {
-    id: 'inv-2',
-    productId: 'prod-french-terry-hoodie',
-    productTitle: '450 GSM Heavy French Terry Boxy Hoodie',
-    variantId: 'v-hd-blk-m',
-    variantTitle: 'Carbon Black / M',
-    oldStock: 17,
-    newStock: 16,
-    change: -1,
-    reason: 'ORDER_PLACED',
-    admin: 'System (Order TS-2026-000102)',
-    timestamp: new Date('2026-03-01T12:30:00Z').toISOString(),
-  },
-  {
-    id: 'inv-3',
-    productId: 'prod-acid-wash-tee',
-    productTitle: 'Heavyweight Acid Wash Boxy Tee',
-    variantId: 'v-tee-blk-m',
-    variantTitle: 'Vintage Black / M',
-    oldStock: 8,
-    newStock: 18,
-    change: 10,
-    reason: 'RESTOCK',
-    admin: 'Store Manager (Mainpuri)',
-    timestamp: new Date('2026-02-05T14:00:00Z').toISOString(),
-  },
-];
+const PRODUCT_SELECT = '*, categories(slug, name), collections(slug, name), product_images(*), product_variants(*)';
 
 class DatabaseService {
-  private state: DatabaseState;
-
-  constructor() {
-    this.ensureDataDirectory();
-    this.state = this.loadDatabase();
-  }
-
-  private ensureDataDirectory() {
-    if (!fs.existsSync(DATA_DIR)) {
-      fs.mkdirSync(DATA_DIR, { recursive: true });
-    }
-  }
-
-  private loadDatabase(): DatabaseState {
-    if (fs.existsSync(DB_FILE)) {
-      try {
-        const raw = fs.readFileSync(DB_FILE, 'utf-8');
-        const parsed = JSON.parse(raw);
-        return {
-          products: parsed.products || INITIAL_PRODUCTS,
-          categories: parsed.categories || INITIAL_CATEGORIES,
-          collections: parsed.collections || INITIAL_COLLECTIONS,
-          coupons: parsed.coupons || INITIAL_COUPONS,
-          orders: parsed.orders || INITIAL_ORDERS,
-          reviews: parsed.reviews || INITIAL_REVIEWS,
-          inventoryLogs: parsed.inventoryLogs || INITIAL_INVENTORY_LOGS,
-          customers: parsed.customers || [
-            { id: 'cust-1', name: 'Rahul Verma', email: 'rahul.verma@example.com', phone: '+91 98980 11223', ordersCount: 1, totalSpent: 3462.9, createdAt: '2026-02-10' },
-            { id: 'cust-2', name: 'Siddharth Roy', email: 'siddharth.roy@example.com', phone: '+91 97112 34567', ordersCount: 1, totalSpent: 2834.05, createdAt: '2026-03-01' }
-          ]
-        };
-      } catch (err) {
-        console.error('Failed to parse database file, resetting to initial seed:', err);
-      }
-    }
-
-    const initialState: DatabaseState = {
-      products: INITIAL_PRODUCTS,
-      categories: INITIAL_CATEGORIES,
-      collections: INITIAL_COLLECTIONS,
-      coupons: INITIAL_COUPONS,
-      orders: INITIAL_ORDERS,
-      reviews: INITIAL_REVIEWS,
-      inventoryLogs: INITIAL_INVENTORY_LOGS,
-      customers: [
-        { id: 'cust-1', name: 'Rahul Verma', email: 'rahul.verma@example.com', phone: '+91 98980 11223', ordersCount: 1, totalSpent: 3462.9, createdAt: '2026-02-10' },
-        { id: 'cust-2', name: 'Siddharth Roy', email: 'siddharth.roy@example.com', phone: '+91 97112 34567', ordersCount: 1, totalSpent: 2834.05, createdAt: '2026-03-01' }
-      ]
-    };
-    this.saveDatabase(initialState);
-    return initialState;
-  }
-
-  private saveDatabase(state?: DatabaseState) {
-    try {
-      const dataToSave = state || this.state;
-      fs.writeFileSync(DB_FILE, JSON.stringify(dataToSave, null, 2), 'utf-8');
-    } catch (err) {
-      console.error('Failed to write database file:', err);
-    }
-  }
-
-  // Products
-  public getProducts(params?: {
+  // -----------------------------------------------------------------
+  // PRODUCTS
+  // -----------------------------------------------------------------
+  public async getProducts(params?: {
     category?: string;
     collection?: string;
     search?: string;
@@ -860,531 +138,847 @@ class DatabaseService {
     maxPrice?: number;
     fit?: string;
     status?: string;
-  }): Product[] {
-    let result = [...this.state.products];
+    page?: number;
+    pageSize?: number;
+    ids?: string[];
+  }): Promise<ProductListResult> {
+    assertSupabaseConfigured();
 
-    // Filter by status (default active only, unless admin specifies)
-    if (params?.status) {
-      result = result.filter(p => p.status === params.status);
-    } else {
-      result = result.filter(p => p.status === 'active');
+    const page = Math.max(1, params?.page || 1);
+    const pageSize = Math.min(60, Math.max(1, params?.pageSize || DEFAULT_PAGE_SIZE));
+
+    if (params?.ids) {
+      if (params.ids.length === 0) return { data: [], total: 0, page: 1, pageSize, hasMore: false };
+      const { data, error, count } = await supabaseAdmin.from('products').select(PRODUCT_SELECT, { count: 'exact' }).in('id', params.ids);
+      if (error) throw error;
+      const products = (data || []).map(mapProductRow);
+      return { data: products, total: count || products.length, page: 1, pageSize: products.length, hasMore: false };
     }
 
-    const filterCategory = params?.category;
-    if (filterCategory && filterCategory !== 'all') {
-      result = result.filter(p => p.category === filterCategory || p.category.toLowerCase() === filterCategory.toLowerCase());
-    }
-
-    const filterCollection = params?.collection;
-    if (filterCollection && filterCollection !== 'all') {
-      result = result.filter(p => p.collection === filterCollection);
-    }
-
-    const filterFit = params?.fit;
-    if (filterFit && filterFit !== 'all') {
-      result = result.filter(p => p.fit.toLowerCase() === filterFit.toLowerCase());
-    }
-
-    if (params?.search) {
-      const q = params.search.toLowerCase().trim();
-      result = result.filter(p =>
-        p.title.toLowerCase().includes(q) ||
-        p.description.toLowerCase().includes(q) ||
-        p.sku.toLowerCase().includes(q) ||
-        p.tags.some(t => t.toLowerCase().includes(q)) ||
-        p.category.toLowerCase().includes(q)
-      );
-    }
-
-    if (params?.size && params.size !== 'all') {
-      result = result.filter(p => p.variants.some(v => v.size.toLowerCase() === params.size!.toLowerCase() && v.stock > 0));
-    }
-
-    if (params?.color && params.color !== 'all') {
-      result = result.filter(p => p.variants.some(v => v.color.toLowerCase().includes(params.color!.toLowerCase())));
-    }
-
-    if (params?.minPrice !== undefined) {
-      result = result.filter(p => p.basePrice >= params.minPrice!);
-    }
-
-    if (params?.maxPrice !== undefined) {
-      result = result.filter(p => p.basePrice <= params.maxPrice!);
-    }
-
-    // Sorting
-    if (params?.sort) {
-      switch (params.sort) {
-        case 'price-low':
-        case 'price-asc':
-          result.sort((a, b) => a.basePrice - b.basePrice);
-          break;
-        case 'price-high':
-        case 'price-desc':
-          result.sort((a, b) => b.basePrice - a.basePrice);
-          break;
-        case 'newest':
-          result.sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime());
-          break;
-        case 'best-selling':
-          result.sort((a, b) => (b.isBestSeller ? 1 : 0) - (a.isBestSeller ? 1 : 0));
-          break;
-        case 'rating':
-          result.sort((a, b) => b.rating - a.rating);
-          break;
-        default:
-          // 'featured'
-          result.sort((a, b) => (b.isFeatured ? 1 : 0) - (a.isFeatured ? 1 : 0));
-          break;
+    let productIdFilter: string[] | null = null;
+    if ((params?.size && params.size !== 'all') || (params?.color && params.color !== 'all')) {
+      let variantQuery = supabaseAdmin.from('product_variants').select('product_id');
+      if (params?.size && params.size !== 'all') {
+        variantQuery = variantQuery.ilike('size', params.size).gt('stock', 0);
+      }
+      if (params?.color && params.color !== 'all') {
+        variantQuery = variantQuery.ilike('color', `%${params.color}%`);
+      }
+      const { data: variantRows, error: variantErr } = await variantQuery;
+      if (variantErr) throw variantErr;
+      productIdFilter = [...new Set((variantRows || []).map((r: any) => r.product_id))];
+      if (productIdFilter.length === 0) {
+        return { data: [], total: 0, page, pageSize, hasMore: false };
       }
     }
 
-    return result;
-  }
+    const needCategoryJoin = Boolean(params?.category && params.category !== 'all');
+    const needCollectionJoin = Boolean(params?.collection && params.collection !== 'all');
+    const select = PRODUCT_SELECT
+      .replace('categories(slug, name)', needCategoryJoin ? 'categories!inner(slug, name)' : 'categories(slug, name)')
+      .replace('collections(slug, name)', needCollectionJoin ? 'collections!inner(slug, name)' : 'collections(slug, name)');
 
-  public getProductBySlug(slug: string): Product | null {
-    const product = this.state.products.find(p => p.slug === slug);
-    return product || null;
-  }
+    let query = supabaseAdmin.from('products').select(select, { count: 'exact' });
 
-  public getProductById(id: string): Product | null {
-    const product = this.state.products.find(p => p.id === id);
-    return product || null;
-  }
+    if (params?.status && params.status !== 'all') {
+      query = query.eq('status', params.status);
+    } else if (!params?.status) {
+      query = query.eq('status', 'active');
+    }
 
-  public createProduct(product: Omit<Product, 'id' | 'createdAt' | 'updatedAt'>): Product {
-    const newProduct: Product = {
-      ...product,
-      id: `prod-${Date.now()}`,
-      createdAt: new Date().toISOString(),
-      updatedAt: new Date().toISOString(),
+    if (needCategoryJoin) {
+      query = query.eq('categories.slug', params!.category);
+    }
+    if (needCollectionJoin) {
+      query = query.eq('collections.slug', params!.collection);
+    }
+    if (params?.fit && params.fit !== 'all') {
+      query = query.ilike('fit', params.fit);
+    }
+    if (params?.search) {
+      const q = params.search.trim();
+      query = query.or(`title.ilike.%${q}%,description.ilike.%${q}%,sku.ilike.%${q}%,brand.ilike.%${q}%`);
+    }
+    if (params?.minPrice !== undefined) {
+      query = query.gte('base_price', params.minPrice);
+    }
+    if (params?.maxPrice !== undefined) {
+      query = query.lte('base_price', params.maxPrice);
+    }
+    if (productIdFilter) {
+      query = query.in('id', productIdFilter);
+    }
+
+    switch (params?.sort) {
+      case 'price-low':
+      case 'price-asc':
+        query = query.order('base_price', { ascending: true });
+        break;
+      case 'price-high':
+      case 'price-desc':
+        query = query.order('base_price', { ascending: false });
+        break;
+      case 'newest':
+        query = query.order('created_at', { ascending: false });
+        break;
+      case 'best-selling':
+        query = query.order('is_best_seller', { ascending: false }).order('review_count', { ascending: false });
+        break;
+      case 'rating':
+        query = query.order('rating', { ascending: false });
+        break;
+      default:
+        query = query.order('is_featured', { ascending: false }).order('created_at', { ascending: false });
+        break;
+    }
+
+    const from = (page - 1) * pageSize;
+    const to = from + pageSize - 1;
+    query = query.range(from, to);
+
+    const { data, error, count } = await query;
+    if (error) throw error;
+
+    const products = (data || []).map(mapProductRow);
+    const total = count || 0;
+
+    return {
+      data: products,
+      total,
+      page,
+      pageSize,
+      hasMore: from + products.length < total,
     };
-    this.state.products.unshift(newProduct);
-    this.saveDatabase();
-    return newProduct;
   }
 
-  public updateProduct(id: string, updates: Partial<Product>): Product | null {
-    const idx = this.state.products.findIndex(p => p.id === id);
-    if (idx === -1) return null;
-
-    this.state.products[idx] = {
-      ...this.state.products[idx],
-      ...updates,
-      updatedAt: new Date().toISOString(),
-    };
-    this.saveDatabase();
-    return this.state.products[idx];
+  public async getProductBySlug(slug: string): Promise<Product | null> {
+    assertSupabaseConfigured();
+    const { data, error } = await supabaseAdmin
+      .from('products')
+      .select(PRODUCT_SELECT)
+      .eq('slug', slug)
+      .maybeSingle();
+    if (error) throw error;
+    return data ? mapProductRow(data) : null;
   }
 
-  public deleteProduct(id: string): boolean {
-    const idx = this.state.products.findIndex(p => p.id === id);
-    if (idx === -1) return false;
-    this.state.products.splice(idx, 1);
-    this.saveDatabase();
-    return true;
+  public async getProductById(id: string): Promise<Product | null> {
+    assertSupabaseConfigured();
+    const { data, error } = await supabaseAdmin
+      .from('products')
+      .select(PRODUCT_SELECT)
+      .eq('id', id)
+      .maybeSingle();
+    if (error) throw error;
+    return data ? mapProductRow(data) : null;
   }
 
-  // Categories & Collections
-  public getCategories(): Category[] {
-    return this.state.categories;
+  private async resolveCategoryId(slug: string): Promise<string> {
+    const { data, error } = await supabaseAdmin.from('categories').select('id').eq('slug', slug).maybeSingle();
+    if (error) throw error;
+    if (!data) throw new Error(`Category "${slug}" does not exist.`);
+    return data.id;
   }
 
-  public getCollections(): Collection[] {
-    return this.state.collections;
+  private async resolveCollectionId(slug?: string): Promise<string | null> {
+    if (!slug) return null;
+    const { data, error } = await supabaseAdmin.from('collections').select('id').eq('slug', slug).maybeSingle();
+    if (error) throw error;
+    return data ? data.id : null;
   }
 
-  // Coupons
-  public getCoupons(): Coupon[] {
-    return this.state.coupons;
+  private async generateUniqueSlug(title: string, excludeId?: string): Promise<string> {
+    const base = slugify(title);
+    let candidate = base;
+    let suffix = 2;
+    // eslint-disable-next-line no-constant-condition
+    while (true) {
+      let query = supabaseAdmin.from('products').select('id').eq('slug', candidate);
+      if (excludeId) query = query.neq('id', excludeId);
+      const { data, error } = await query.maybeSingle();
+      if (error) throw error;
+      if (!data) return candidate;
+      candidate = `${base}-${suffix++}`;
+    }
   }
 
-  public validateCoupon(code: string, subtotal: number): { valid: boolean; discount: number; message: string; coupon?: Coupon } {
+  public async createProduct(input: AdminProductInput): Promise<Product> {
+    assertSupabaseConfigured();
+    if (!input.images?.length) throw new Error('At least one product image is required.');
+    if (!input.variants?.length) throw new Error('At least one product variant is required.');
+
+    const categoryId = await this.resolveCategoryId(input.categorySlug);
+    const collectionId = await this.resolveCollectionId(input.collectionSlug);
+    const slug = input.slug ? slugify(input.slug) : await this.generateUniqueSlug(input.title);
+
+    const { data: productRow, error: productErr } = await supabaseAdmin
+      .from('products')
+      .insert({
+        title: input.title,
+        slug,
+        brand: input.brand || 'TREND STREET',
+        short_description: input.shortDescription || null,
+        description: input.description,
+        category_id: categoryId,
+        collection_id: collectionId,
+        subcategory: input.subcategory || null,
+        gender: input.gender || 'men',
+        sku: input.sku,
+        base_price: input.basePrice,
+        compare_at_price: input.compareAtPrice ?? null,
+        discount_percentage: input.discountPercentage || 0,
+        status: input.status || 'active',
+        tags: input.tags || [],
+        product_type: input.productType || null,
+        material: input.material || null,
+        fit: input.fit || null,
+        care_instructions: input.careInstructions || null,
+        weight_grams: input.weightGrams || 350,
+        video_url: input.videoUrl || null,
+        seo_title: input.seoTitle || null,
+        seo_description: input.seoDescription || null,
+        is_featured: Boolean(input.isFeatured),
+        is_new_arrival: Boolean(input.isNewArrival),
+        is_best_seller: Boolean(input.isBestSeller),
+        is_trending: Boolean(input.isTrending),
+      })
+      .select('id')
+      .single();
+
+    if (productErr) throw productErr;
+    const productId = productRow.id as string;
+
+    try {
+      await this.replaceProductImages(productId, input.images);
+      await this.replaceProductVariants(productId, input.sku, input.title, input.variants);
+    } catch (err) {
+      await supabaseAdmin.from('products').delete().eq('id', productId);
+      throw err;
+    }
+
+    const created = await this.getProductById(productId);
+    if (!created) throw new Error('Failed to load product after creation.');
+    return created;
+  }
+
+  public async updateProduct(id: string, input: Partial<AdminProductInput>): Promise<Product | null> {
+    assertSupabaseConfigured();
+    const existing = await this.getProductById(id);
+    if (!existing) return null;
+
+    const updates: Record<string, any> = { updated_at: new Date().toISOString() };
+    if (input.title !== undefined) updates.title = input.title;
+    if (input.slug !== undefined) updates.slug = await this.generateUniqueSlug(input.slug, id);
+    if (input.brand !== undefined) updates.brand = input.brand;
+    if (input.shortDescription !== undefined) updates.short_description = input.shortDescription;
+    if (input.description !== undefined) updates.description = input.description;
+    if (input.categorySlug !== undefined) updates.category_id = await this.resolveCategoryId(input.categorySlug);
+    if (input.collectionSlug !== undefined) updates.collection_id = await this.resolveCollectionId(input.collectionSlug);
+    if (input.subcategory !== undefined) updates.subcategory = input.subcategory;
+    if (input.gender !== undefined) updates.gender = input.gender;
+    if (input.sku !== undefined) updates.sku = input.sku;
+    if (input.basePrice !== undefined) updates.base_price = input.basePrice;
+    if (input.compareAtPrice !== undefined) updates.compare_at_price = input.compareAtPrice;
+    if (input.discountPercentage !== undefined) updates.discount_percentage = input.discountPercentage;
+    if (input.status !== undefined) updates.status = input.status;
+    if (input.tags !== undefined) updates.tags = input.tags;
+    if (input.productType !== undefined) updates.product_type = input.productType;
+    if (input.material !== undefined) updates.material = input.material;
+    if (input.fit !== undefined) updates.fit = input.fit;
+    if (input.careInstructions !== undefined) updates.care_instructions = input.careInstructions;
+    if (input.weightGrams !== undefined) updates.weight_grams = input.weightGrams;
+    if (input.videoUrl !== undefined) updates.video_url = input.videoUrl;
+    if (input.seoTitle !== undefined) updates.seo_title = input.seoTitle;
+    if (input.seoDescription !== undefined) updates.seo_description = input.seoDescription;
+    if (input.isFeatured !== undefined) updates.is_featured = input.isFeatured;
+    if (input.isNewArrival !== undefined) updates.is_new_arrival = input.isNewArrival;
+    if (input.isBestSeller !== undefined) updates.is_best_seller = input.isBestSeller;
+    if (input.isTrending !== undefined) updates.is_trending = input.isTrending;
+
+    const { error: updateErr } = await supabaseAdmin.from('products').update(updates).eq('id', id);
+    if (updateErr) throw updateErr;
+
+    if (input.images) {
+      await this.replaceProductImages(id, input.images);
+    }
+    if (input.variants) {
+      await this.replaceProductVariants(id, input.sku || existing.sku, input.title || existing.title, input.variants);
+    }
+
+    return this.getProductById(id);
+  }
+
+  private async replaceProductImages(productId: string, images: AdminProductInput['images']) {
+    await supabaseAdmin.from('product_images').delete().eq('product_id', productId);
+    if (!images.length) return;
+    const rows = images.map((img, idx) => ({
+      product_id: productId,
+      url: img.url,
+      alt_text: img.altText || '',
+      display_order: idx,
+      is_primary: img.isPrimary ?? idx === 0,
+      color: img.color || null,
+    }));
+    const { error } = await supabaseAdmin.from('product_images').insert(rows);
+    if (error) throw error;
+  }
+
+  private async replaceProductVariants(productId: string, productSku: string, productTitle: string, variants: AdminProductInput['variants']) {
+    await supabaseAdmin.from('product_variants').delete().eq('product_id', productId);
+    if (!variants.length) return;
+    const rows = variants.map(v => ({
+      product_id: productId,
+      title: `${v.color} / ${v.size}`,
+      sku: v.exactSku || (v.skuSuffix ? `${productSku}-${v.skuSuffix}` : `${productSku}-${slugify(v.color).toUpperCase()}-${v.size}`),
+      price: v.price,
+      compare_at_price: v.compareAtPrice ?? null,
+      color: v.color,
+      color_hex: v.colorHex,
+      size: v.size,
+      stock: v.stock,
+    }));
+    const { error } = await supabaseAdmin.from('product_variants').insert(rows);
+    if (error) throw error;
+  }
+
+  /** Soft delete: archives the product instead of removing it, per store policy. */
+  public async deleteProduct(id: string): Promise<boolean> {
+    assertSupabaseConfigured();
+    const { error, data } = await supabaseAdmin
+      .from('products')
+      .update({ status: 'archived', updated_at: new Date().toISOString() })
+      .eq('id', id)
+      .select('id')
+      .maybeSingle();
+    if (error) throw error;
+    return Boolean(data);
+  }
+
+  // -----------------------------------------------------------------
+  // CATEGORIES & COLLECTIONS
+  // -----------------------------------------------------------------
+  public async getCategories(): Promise<Category[]> {
+    assertSupabaseConfigured();
+    const { data, error } = await supabaseAdmin.from('categories').select('*').order('display_order');
+    if (error) throw error;
+    return (data || []).map((c: any) => ({
+      id: c.id,
+      name: c.name,
+      slug: c.slug,
+      description: c.description || '',
+      imageUrl: c.image_url || '',
+      itemCount: 0,
+    }));
+  }
+
+  public async getCollections(): Promise<Collection[]> {
+    assertSupabaseConfigured();
+    const { data, error } = await supabaseAdmin.from('collections').select('*').eq('is_active', true).order('created_at');
+    if (error) throw error;
+    return (data || []).map((c: any) => ({
+      id: c.id,
+      name: c.name,
+      slug: c.slug,
+      description: c.description || '',
+      bannerImage: c.banner_image || '',
+    }));
+  }
+
+  // -----------------------------------------------------------------
+  // COUPONS
+  // -----------------------------------------------------------------
+  public async getCoupons(): Promise<Coupon[]> {
+    assertSupabaseConfigured();
+    const { data, error } = await supabaseAdmin.from('coupons').select('*').eq('is_active', true);
+    if (error) throw error;
+    return (data || []).map(mapCouponRow);
+  }
+
+  public async validateCoupon(code: string, subtotal: number): Promise<{ valid: boolean; discount: number; message: string; coupon?: Coupon }> {
+    assertSupabaseConfigured();
     const normalized = code.trim().toUpperCase();
-    const coupon = this.state.coupons.find(c => c.code.toUpperCase() === normalized);
+    const { data, error } = await supabaseAdmin.from('coupons').select('*').ilike('code', normalized).maybeSingle();
+    if (error) throw error;
+    if (!data) return { valid: false, discount: 0, message: 'Invalid coupon code.' };
 
-    if (!coupon) {
-      return { valid: false, discount: 0, message: 'Invalid coupon code.' };
-    }
-
-    if (!coupon.isActive) {
-      return { valid: false, discount: 0, message: 'This coupon is no longer active.' };
-    }
-
-    const now = new Date();
-    if (new Date(coupon.expiryDate) < now) {
-      return { valid: false, discount: 0, message: 'This coupon has expired.' };
-    }
-
+    const coupon = mapCouponRow(data);
+    if (!coupon.isActive) return { valid: false, discount: 0, message: 'This coupon is no longer active.' };
+    if (new Date(coupon.expiryDate) < new Date()) return { valid: false, discount: 0, message: 'This coupon has expired.' };
     if (coupon.usageLimit && coupon.usedCount >= coupon.usageLimit) {
       return { valid: false, discount: 0, message: 'Coupon usage limit reached.' };
     }
-
     if (subtotal < coupon.minimumOrder) {
       return {
         valid: false,
         discount: 0,
-        message: `Add items worth ₹${(coupon.minimumOrder - subtotal).toFixed(0)} more to apply coupon ${coupon.code}. Minimum order ₹${coupon.minimumOrder}.`
+        message: `Add items worth ₹${(coupon.minimumOrder - subtotal).toFixed(0)} more to apply coupon ${coupon.code}. Minimum order ₹${coupon.minimumOrder}.`,
       };
     }
 
-    let calculatedDiscount = 0;
-    if (coupon.type === 'percentage') {
-      calculatedDiscount = (subtotal * coupon.value) / 100;
-      if (coupon.maximumDiscount && calculatedDiscount > coupon.maximumDiscount) {
-        calculatedDiscount = coupon.maximumDiscount;
-      }
-    } else {
-      calculatedDiscount = coupon.value;
+    let discount = coupon.type === 'percentage' ? (subtotal * coupon.value) / 100 : coupon.value;
+    if (coupon.type === 'percentage' && coupon.maximumDiscount && discount > coupon.maximumDiscount) {
+      discount = coupon.maximumDiscount;
     }
-
-    // Discount cannot exceed subtotal
-    calculatedDiscount = Math.min(calculatedDiscount, subtotal);
+    discount = Math.min(discount, subtotal);
 
     return {
       valid: true,
-      discount: Math.round(calculatedDiscount * 100) / 100,
-      message: `Coupon ${coupon.code} applied successfully! You saved ₹${calculatedDiscount.toFixed(0)}.`,
+      discount: Math.round(discount * 100) / 100,
+      message: `Coupon ${coupon.code} applied successfully! You saved ₹${discount.toFixed(0)}.`,
       coupon,
     };
   }
 
-  // Inventory & Stock Validation
-  public checkStockAvailability(items: { productId: string; variantId: string; quantity: number }[]): {
+  // -----------------------------------------------------------------
+  // INVENTORY
+  // -----------------------------------------------------------------
+  private async checkStockAvailability(items: { productId: string; variantId: string; quantity: number }[]): Promise<{
     available: boolean;
     errorItem?: { productTitle: string; requested: number; inStock: number };
-  } {
+  }> {
     for (const item of items) {
-      const product = this.getProductById(item.productId);
-      if (!product) {
+      const { data: variant, error } = await supabaseAdmin
+        .from('product_variants')
+        .select('id, stock, title, products(title)')
+        .eq('id', item.variantId)
+        .maybeSingle();
+      if (error) throw error;
+      if (!variant) {
         return { available: false, errorItem: { productTitle: 'Unknown Product', requested: item.quantity, inStock: 0 } };
       }
-      const variant = product.variants.find(v => v.id === item.variantId);
-      if (!variant) {
-        return { available: false, errorItem: { productTitle: product.title, requested: item.quantity, inStock: 0 } };
-      }
       if (variant.stock < item.quantity) {
-        return { available: false, errorItem: { productTitle: `${product.title} (${variant.title})`, requested: item.quantity, inStock: variant.stock } };
+        const productTitle = (variant as any).products?.title || 'Product';
+        return {
+          available: false,
+          errorItem: { productTitle: `${productTitle} (${variant.title})`, requested: item.quantity, inStock: variant.stock },
+        };
       }
     }
     return { available: true };
   }
 
-  // Orders
-  public getOrders(): Order[] {
-    return [...this.state.orders].sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime());
+  private async logInventoryChange(productId: string, productTitle: string, variantId: string, variantTitle: string, oldStock: number, newStock: number, reason: InventoryLog['reason'], admin: string) {
+    const { error } = await supabaseAdmin.from('inventory_logs').insert({
+      product_id: productId,
+      product_title: productTitle,
+      variant_id: variantId,
+      variant_title: variantTitle,
+      old_stock: oldStock,
+      new_stock: newStock,
+      change: newStock - oldStock,
+      reason,
+      admin,
+    });
+    if (error) throw error;
   }
 
-  public getOrderByIdOrNumber(idOrNumber: string): Order | null {
-    const order = this.state.orders.find(o => o.id === idOrNumber || o.orderNumber === idOrNumber);
-    return order || null;
+  public async getInventoryLogs(): Promise<InventoryLog[]> {
+    assertSupabaseConfigured();
+    const { data, error } = await supabaseAdmin.from('inventory_logs').select('*').order('created_at', { ascending: false }).limit(200);
+    if (error) throw error;
+    return (data || []).map((l: any) => ({
+      id: l.id,
+      productId: l.product_id,
+      productTitle: l.product_title,
+      variantId: l.variant_id,
+      variantTitle: l.variant_title,
+      oldStock: l.old_stock,
+      newStock: l.new_stock,
+      change: l.change,
+      reason: l.reason,
+      admin: l.admin,
+      timestamp: l.created_at,
+    }));
   }
 
-  public createOrder(data: {
+  public async adjustInventory(variantId: string, newStock: number, reason: InventoryLog['reason'], admin: string): Promise<boolean> {
+    assertSupabaseConfigured();
+    const { data: variant, error: fetchErr } = await supabaseAdmin
+      .from('product_variants')
+      .select('id, stock, title, product_id, products(title)')
+      .eq('id', variantId)
+      .maybeSingle();
+    if (fetchErr) throw fetchErr;
+    if (!variant) return false;
+
+    const clamped = Math.max(0, newStock);
+    const { error: updateErr } = await supabaseAdmin
+      .from('product_variants')
+      .update({ stock: clamped, updated_at: new Date().toISOString() })
+      .eq('id', variantId);
+    if (updateErr) throw updateErr;
+
+    await this.logInventoryChange(
+      variant.product_id,
+      (variant as any).products?.title || 'Product',
+      variant.id,
+      variant.title,
+      variant.stock,
+      clamped,
+      reason,
+      admin
+    );
+    return true;
+  }
+
+  // -----------------------------------------------------------------
+  // ORDERS
+  // -----------------------------------------------------------------
+  public async getOrders(): Promise<Order[]> {
+    assertSupabaseConfigured();
+    const { data, error } = await supabaseAdmin
+      .from('orders')
+      .select('*, order_items(*), order_status_history(*)')
+      .order('created_at', { ascending: false });
+    if (error) throw error;
+    return (data || []).map(mapOrderRow);
+  }
+
+  public async getOrderByIdOrNumber(idOrNumber: string): Promise<Order | null> {
+    assertSupabaseConfigured();
+    const { data, error } = await supabaseAdmin
+      .from('orders')
+      .select('*, order_items(*), order_status_history(*)')
+      .or(`id.eq.${idOrNumber},order_number.eq.${idOrNumber}`)
+      .maybeSingle();
+    if (error) throw error;
+    return data ? mapOrderRow(data) : null;
+  }
+
+  public async createOrder(data: {
     customerName: string;
     customerEmail: string;
     customerPhone: string;
+    userId?: string;
     shippingAddress: Order['shippingAddress'];
     billingAddress?: Order['billingAddress'];
-    items: Order['items'];
+    items: { productId: string; variantId: string; title: string; variantTitle: string; color: string; size: string; sku: string; price: number; quantity: number; image: string }[];
     couponCode?: string;
     paymentMethod: Order['paymentMethod'];
     paymentStatus?: Order['paymentStatus'];
     razorpayOrderId?: string;
     razorpayPaymentId?: string;
     notes?: string;
-  }): { success: boolean; order?: Order; error?: string } {
-    // 1. Stock check
-    const stockCheck = this.checkStockAvailability(data.items);
+  }): Promise<{ success: boolean; order?: Order; error?: string }> {
+    assertSupabaseConfigured();
+
+    const stockCheck = await this.checkStockAvailability(data.items);
     if (!stockCheck.available) {
-      return {
-        success: false,
-        error: `Insufficient stock for ${stockCheck.errorItem?.productTitle}. Only ${stockCheck.errorItem?.inStock} available.`,
-      };
+      return { success: false, error: `Insufficient stock for ${stockCheck.errorItem?.productTitle}. Only ${stockCheck.errorItem?.inStock} available.` };
     }
 
-    // 2. Calculate authoritative server price
     let subtotal = 0;
-    const validatedItems = data.items.map(item => {
-      const product = this.getProductById(item.productId);
-      const variant = product?.variants.find(v => v.id === item.variantId);
-      const unitPrice = variant?.price ?? product?.basePrice ?? item.price;
-      const itemTotal = unitPrice * item.quantity;
-      subtotal += itemTotal;
-      return {
-        ...item,
-        price: unitPrice,
-        total: itemTotal,
-      };
-    });
+    const validatedItems: OrderItem[] = [];
+    for (const item of data.items) {
+      const { data: variant } = await supabaseAdmin.from('product_variants').select('price').eq('id', item.variantId).maybeSingle();
+      const unitPrice = variant ? Number(variant.price) : item.price;
+      const total = unitPrice * item.quantity;
+      subtotal += total;
+      validatedItems.push({ id: '', productId: item.productId, variantId: item.variantId, title: item.title, variantTitle: item.variantTitle, sku: item.sku, color: item.color, size: item.size, price: unitPrice, quantity: item.quantity, image: item.image, total });
+    }
 
-    // 3. Validate coupon server-side
     let discount = 0;
+    let appliedCoupon: Coupon | undefined;
     if (data.couponCode) {
-      const couponValidation = this.validateCoupon(data.couponCode, subtotal);
-      if (couponValidation.valid) {
-        discount = couponValidation.discount;
-        // Increment coupon used count
-        const couponIdx = this.state.coupons.findIndex(c => c.code.toUpperCase() === data.couponCode!.toUpperCase());
-        if (couponIdx !== -1) {
-          this.state.coupons[couponIdx].usedCount += 1;
-        }
+      const validation = await this.validateCoupon(data.couponCode, subtotal);
+      if (validation.valid) {
+        discount = validation.discount;
+        appliedCoupon = validation.coupon;
       }
     }
 
-    // 4. Calculate Shipping: Free above threshold (₹1999), else standard ₹99
     const shippingCharge = subtotal >= STORE_CONFIG.freeShippingThreshold ? 0 : STORE_CONFIG.standardShippingFee;
-
-    // 5. 5% GST included or calculated
     const taxableSubtotal = Math.max(0, subtotal - discount);
-    const taxAmount = Math.round((taxableSubtotal * 0.05) * 100) / 100;
+    const taxAmount = Math.round(taxableSubtotal * 0.05 * 100) / 100;
     const grandTotal = Math.round((taxableSubtotal + shippingCharge) * 100) / 100;
+    const orderNumber = `TS-2026-${Math.floor(100000 + Math.random() * 900000)}`;
 
-    // 6. Generate human-readable order number: TS-2026-XXXXXX
-    const randomSeq = Math.floor(100000 + Math.random() * 900000);
-    const orderNumber = `TS-2026-${randomSeq}`;
+    const { data: orderRow, error: orderErr } = await supabaseAdmin
+      .from('orders')
+      .insert({
+        order_number: orderNumber,
+        user_id: data.userId || null,
+        customer_name: data.customerName,
+        customer_email: data.customerEmail,
+        customer_phone: data.customerPhone,
+        shipping_address: data.shippingAddress,
+        billing_address: data.billingAddress || data.shippingAddress,
+        subtotal,
+        discount,
+        coupon_code: data.couponCode || null,
+        shipping_charge: shippingCharge,
+        tax_amount: taxAmount,
+        grand_total: grandTotal,
+        payment_method: data.paymentMethod,
+        payment_status: data.paymentStatus || (data.paymentMethod === 'COD' ? 'PENDING' : 'PAID'),
+        order_status: 'CONFIRMED',
+        razorpay_order_id: data.razorpayOrderId || null,
+        razorpay_payment_id: data.razorpayPaymentId || null,
+        notes: data.notes || null,
+      })
+      .select('*')
+      .single();
+    if (orderErr) throw orderErr;
 
-    // 7. Deduct inventory & record logs
-    data.items.forEach(item => {
-      const product = this.getProductById(item.productId);
-      if (product) {
-        const variant = product.variants.find(v => v.id === item.variantId);
-        if (variant) {
-          const oldStock = variant.stock;
-          variant.stock = Math.max(0, variant.stock - item.quantity);
+    const orderId = orderRow.id as string;
 
-          this.state.inventoryLogs.unshift({
-            id: `inv-${Date.now()}-${Math.random().toString(36).substring(2, 6)}`,
-            productId: product.id,
-            productTitle: product.title,
-            variantId: variant.id,
-            variantTitle: variant.title,
-            oldStock,
-            newStock: variant.stock,
-            change: -item.quantity,
-            reason: 'ORDER_PLACED',
-            admin: `Order Placed (${orderNumber})`,
-            timestamp: new Date().toISOString(),
-          });
-        }
-      }
-    });
+    const { error: itemsErr } = await supabaseAdmin.from('order_items').insert(
+      validatedItems.map(item => ({
+        order_id: orderId,
+        product_id: item.productId,
+        variant_id: item.variantId,
+        title: item.title,
+        variant_title: item.variantTitle,
+        sku: item.sku,
+        color: item.color,
+        size: item.size,
+        price: item.price,
+        quantity: item.quantity,
+        image: item.image,
+        total: item.total,
+      }))
+    );
+    if (itemsErr) throw itemsErr;
 
-    const newOrder: Order = {
-      id: `ord-${Date.now()}`,
-      orderNumber,
-      customerName: data.customerName,
-      customerEmail: data.customerEmail,
-      customerPhone: data.customerPhone,
-      shippingAddress: data.shippingAddress,
-      billingAddress: data.billingAddress || data.shippingAddress,
-      items: validatedItems,
-      subtotal,
-      discount,
-      couponCode: data.couponCode,
-      shippingCharge,
-      taxAmount,
-      grandTotal,
-      paymentMethod: data.paymentMethod,
-      paymentStatus: data.paymentStatus || (data.paymentMethod === 'COD' ? 'PENDING' : 'PAID'),
-      orderStatus: 'CONFIRMED',
-      razorpayOrderId: data.razorpayOrderId,
-      razorpayPaymentId: data.razorpayPaymentId,
-      statusHistory: [
-        { status: 'PENDING', timestamp: new Date().toISOString() },
-        { status: 'CONFIRMED', timestamp: new Date().toISOString(), note: `Order placed via ${data.paymentMethod}` },
-      ],
-      notes: data.notes,
-      createdAt: new Date().toISOString(),
-      updatedAt: new Date().toISOString(),
-    };
+    await supabaseAdmin.from('order_status_history').insert([
+      { order_id: orderId, status: 'PENDING', note: null },
+      { order_id: orderId, status: 'CONFIRMED', note: `Order placed via ${data.paymentMethod}` },
+    ]);
 
-    this.state.orders.unshift(newOrder);
-
-    // Update or add customer record
-    const existingCust = this.state.customers.find(c => c.email.toLowerCase() === data.customerEmail.toLowerCase());
-    if (existingCust) {
-      existingCust.ordersCount += 1;
-      existingCust.totalSpent += grandTotal;
-    } else {
-      this.state.customers.push({
-        id: `cust-${Date.now()}`,
-        name: data.customerName,
-        email: data.customerEmail,
-        phone: data.customerPhone,
-        ordersCount: 1,
-        totalSpent: grandTotal,
-        createdAt: new Date().toISOString().split('T')[0],
-      });
+    // Deduct inventory & record logs
+    for (const item of validatedItems) {
+      const { data: variant } = await supabaseAdmin.from('product_variants').select('stock, title').eq('id', item.variantId).maybeSingle();
+      if (!variant) continue;
+      const newStock = Math.max(0, variant.stock - item.quantity);
+      await supabaseAdmin.from('product_variants').update({ stock: newStock, updated_at: new Date().toISOString() }).eq('id', item.variantId);
+      await this.logInventoryChange(item.productId, item.title, item.variantId, variant.title, variant.stock, newStock, 'ORDER_PLACED', `Order Placed (${orderNumber})`);
     }
 
-    this.saveDatabase();
-    return { success: true, order: newOrder };
+    if (appliedCoupon) {
+      await supabaseAdmin.from('coupons').update({ used_count: appliedCoupon.usedCount + 1 }).eq('id', appliedCoupon.id);
+      await supabaseAdmin.from('coupon_usages').insert({ coupon_id: appliedCoupon.id, order_id: orderId, user_id: data.userId || null, discount_amount: discount });
+    }
+
+    const order = await this.getOrderByIdOrNumber(orderId);
+    return { success: true, order: order! };
   }
 
-  public updateOrderStatus(orderId: string, status: Order['orderStatus'], note?: string): Order | null {
-    const order = this.state.orders.find(o => o.id === orderId || o.orderNumber === orderId);
+  public async updateOrderStatus(orderId: string, status: Order['orderStatus'], note?: string): Promise<Order | null> {
+    assertSupabaseConfigured();
+    const order = await this.getOrderByIdOrNumber(orderId);
     if (!order) return null;
 
-    order.orderStatus = status;
-    order.statusHistory.push({
-      status,
-      timestamp: new Date().toISOString(),
-      note,
-    });
-    order.updatedAt = new Date().toISOString();
+    await supabaseAdmin.from('orders').update({ order_status: status, updated_at: new Date().toISOString() }).eq('id', order.id);
+    await supabaseAdmin.from('order_status_history').insert({ order_id: order.id, status, note: note || null });
 
-    // If cancelled, restore stock
     if (status === 'CANCELLED') {
-      order.items.forEach(item => {
-        const product = this.getProductById(item.productId);
-        if (product) {
-          const variant = product.variants.find(v => v.id === item.variantId);
-          if (variant) {
-            const oldStock = variant.stock;
-            variant.stock += item.quantity;
-
-            this.state.inventoryLogs.unshift({
-              id: `inv-${Date.now()}-${Math.random().toString(36).substring(2, 6)}`,
-              productId: product.id,
-              productTitle: product.title,
-              variantId: variant.id,
-              variantTitle: variant.title,
-              oldStock,
-              newStock: variant.stock,
-              change: item.quantity,
-              reason: 'ORDER_CANCELLED',
-              admin: `Cancelled (${order.orderNumber})`,
-              timestamp: new Date().toISOString(),
-            });
-          }
-        }
-      });
-    }
-
-    this.saveDatabase();
-    return order;
-  }
-
-  // Inventory Adjustments
-  public adjustInventory(variantId: string, newStock: number, reason: InventoryLog['reason'], admin: string): boolean {
-    for (const product of this.state.products) {
-      const variant = product.variants.find(v => v.id === variantId);
-      if (variant) {
-        const oldStock = variant.stock;
-        variant.stock = Math.max(0, newStock);
-
-        this.state.inventoryLogs.unshift({
-          id: `inv-${Date.now()}-${Math.random().toString(36).substring(2, 6)}`,
-          productId: product.id,
-          productTitle: product.title,
-          variantId: variant.id,
-          variantTitle: variant.title,
-          oldStock,
-          newStock: variant.stock,
-          change: newStock - oldStock,
-          reason,
-          admin,
-          timestamp: new Date().toISOString(),
-        });
-
-        this.saveDatabase();
-        return true;
+      for (const item of order.items) {
+        const { data: variant } = await supabaseAdmin.from('product_variants').select('stock').eq('id', item.variantId).maybeSingle();
+        if (!variant) continue;
+        const newStock = variant.stock + item.quantity;
+        await supabaseAdmin.from('product_variants').update({ stock: newStock, updated_at: new Date().toISOString() }).eq('id', item.variantId);
+        await this.logInventoryChange(item.productId, item.title, item.variantId, item.variantTitle, variant.stock, newStock, 'ORDER_CANCELLED', `Cancelled (${order.orderNumber})`);
       }
     }
-    return false;
+
+    return this.getOrderByIdOrNumber(order.id);
   }
 
-  public getInventoryLogs(): InventoryLog[] {
-    return this.state.inventoryLogs;
+  // -----------------------------------------------------------------
+  // REVIEWS
+  // -----------------------------------------------------------------
+  public async getReviews(productId?: string): Promise<Review[]> {
+    assertSupabaseConfigured();
+    let query = supabaseAdmin.from('reviews').select('*').order('created_at', { ascending: false });
+    if (productId) query = query.eq('product_id', productId).eq('is_approved', true);
+    const { data, error } = await query;
+    if (error) throw error;
+    return (data || []).map(mapReviewRow);
   }
 
-  // Reviews
-  public getReviews(productId?: string): Review[] {
-    if (productId) {
-      return this.state.reviews.filter(r => r.productId === productId && r.isApproved);
-    }
-    return this.state.reviews;
+  public async addReview(review: { productId: string; userName: string; userEmail?: string; rating: number; title: string; comment: string; isVerifiedPurchase: boolean; isApproved: boolean }): Promise<Review> {
+    assertSupabaseConfigured();
+    const { data, error } = await supabaseAdmin
+      .from('reviews')
+      .insert({
+        product_id: review.productId,
+        user_name: review.userName,
+        user_email: review.userEmail || null,
+        rating: review.rating,
+        title: review.title,
+        comment: review.comment,
+        is_verified_purchase: review.isVerifiedPurchase,
+        is_approved: review.isApproved,
+      })
+      .select('*')
+      .single();
+    if (error) throw error;
+
+    const { data: approvedReviews } = await supabaseAdmin.from('reviews').select('rating').eq('product_id', review.productId).eq('is_approved', true);
+    const list = approvedReviews || [];
+    const avg = list.reduce((acc: number, r: any) => acc + r.rating, 0) / (list.length || 1);
+    await supabaseAdmin.from('products').update({ rating: Math.round(avg * 10) / 10, review_count: list.length }).eq('id', review.productId);
+
+    return mapReviewRow(data);
   }
 
-  public addReview(review: Omit<Review, 'id' | 'createdAt'>): Review {
-    const newReview: Review = {
-      ...review,
-      id: `rev-${Date.now()}`,
-      createdAt: new Date().toISOString(),
-    };
-    this.state.reviews.unshift(newReview);
+  // -----------------------------------------------------------------
+  // ADMIN METRICS & CUSTOMERS
+  // -----------------------------------------------------------------
+  public async getAdminMetrics(): Promise<AdminMetrics> {
+    assertSupabaseConfigured();
+    const { data: orders, error: ordersErr } = await supabaseAdmin.from('orders').select('*, order_items(*), order_status_history(*)').order('created_at', { ascending: false });
+    if (ordersErr) throw ordersErr;
+    const mappedOrders = (orders || []).map(mapOrderRow);
 
-    // Update product rating & count
-    const productReviews = this.state.reviews.filter(r => r.productId === review.productId && r.isApproved);
-    const avg = productReviews.reduce((acc, r) => acc + r.rating, 0) / (productReviews.length || 1);
-    const product = this.getProductById(review.productId);
-    if (product) {
-      product.rating = Math.round(avg * 10) / 10;
-      product.reviewCount = productReviews.length;
-    }
-
-    this.saveDatabase();
-    return newReview;
-  }
-
-  // Admin Metrics
-  public getAdminMetrics(): AdminMetrics {
-    const totalOrders = this.state.orders.length;
-    const totalRevenue = this.state.orders
-      .filter(o => o.paymentStatus === 'PAID' || o.orderStatus === 'DELIVERED')
-      .reduce((sum, o) => sum + o.grandTotal, 0);
-
+    const totalOrders = mappedOrders.length;
+    const totalRevenue = mappedOrders.filter(o => o.paymentStatus === 'PAID' || o.orderStatus === 'DELIVERED').reduce((sum, o) => sum + o.grandTotal, 0);
     const averageOrderValue = totalOrders > 0 ? Math.round(totalRevenue / totalOrders) : 0;
-    const totalCustomers = this.state.customers.length;
-    const totalProducts = this.state.products.length;
+    const pendingOrdersCount = mappedOrders.filter(o => o.orderStatus === 'PENDING' || o.orderStatus === 'CONFIRMED').length;
 
-    // Count variants with stock <= 5
-    let lowStockCount = 0;
-    this.state.products.forEach(p => {
-      p.variants.forEach(v => {
-        if (v.stock <= 5) lowStockCount++;
-      });
-    });
+    const { count: totalProducts } = await supabaseAdmin.from('products').select('id', { count: 'exact', head: true }).neq('status', 'archived');
+    const { data: lowStockVariants } = await supabaseAdmin.from('product_variants').select('id').lte('stock', 5);
+    const { count: totalCustomers } = await supabaseAdmin.from('profiles').select('id', { count: 'exact', head: true }).eq('role', 'customer');
 
-    const pendingOrdersCount = this.state.orders.filter(o => o.orderStatus === 'PENDING' || o.orderStatus === 'CONFIRMED').length;
-
-    // Sales by Category
     const categoryMap: { [cat: string]: { amount: number; count: number } } = {};
-    this.state.orders.forEach(order => {
-      order.items.forEach(item => {
-        const product = this.getProductById(item.productId);
-        const cat = product?.category || 'other';
-        if (!categoryMap[cat]) {
-          categoryMap[cat] = { amount: 0, count: 0 };
-        }
+    for (const order of mappedOrders) {
+      for (const item of order.items) {
+        const { data: product } = await supabaseAdmin.from('products').select('categories(slug)').eq('id', item.productId).maybeSingle();
+        const cat = (product as any)?.categories?.slug || 'other';
+        if (!categoryMap[cat]) categoryMap[cat] = { amount: 0, count: 0 };
         categoryMap[cat].amount += item.total;
         categoryMap[cat].count += item.quantity;
-      });
-    });
-
-    const salesByCategory = Object.entries(categoryMap).map(([category, data]) => ({
-      category,
-      amount: Math.round(data.amount),
-      count: data.count,
-    }));
+      }
+    }
 
     return {
       totalRevenue: Math.round(totalRevenue),
       totalOrders,
       averageOrderValue,
-      totalCustomers,
-      totalProducts,
-      lowStockCount,
+      totalCustomers: totalCustomers || 0,
+      totalProducts: totalProducts || 0,
+      lowStockCount: (lowStockVariants || []).length,
       pendingOrdersCount,
-      salesByCategory,
-      recentOrders: this.state.orders.slice(0, 5),
+      salesByCategory: Object.entries(categoryMap).map(([category, d]) => ({ category, amount: Math.round(d.amount), count: d.count })),
+      recentOrders: mappedOrders.slice(0, 5),
     };
   }
 
-  public getCustomers() {
-    return this.state.customers;
+  public async getAllActiveProductsForSitemap(): Promise<{ slug: string; updatedAt: string }[]> {
+    assertSupabaseConfigured();
+    const { data, error } = await supabaseAdmin.from('products').select('slug, updated_at').eq('status', 'active');
+    if (error) throw error;
+    return (data || []).map((p: any) => ({ slug: p.slug, updatedAt: p.updated_at }));
   }
+
+  public async getCustomers() {
+    assertSupabaseConfigured();
+    const { data: orders, error } = await supabaseAdmin.from('orders').select('customer_name, customer_email, customer_phone, grand_total, created_at');
+    if (error) throw error;
+
+    const map = new Map<string, { id: string; name: string; email: string; phone: string; ordersCount: number; totalSpent: number; createdAt: string }>();
+    for (const o of orders || []) {
+      const key = o.customer_email.toLowerCase();
+      const existing = map.get(key);
+      if (existing) {
+        existing.ordersCount += 1;
+        existing.totalSpent += Number(o.grand_total);
+      } else {
+        map.set(key, {
+          id: key,
+          name: o.customer_name,
+          email: o.customer_email,
+          phone: o.customer_phone,
+          ordersCount: 1,
+          totalSpent: Number(o.grand_total),
+          createdAt: o.created_at,
+        });
+      }
+    }
+    return Array.from(map.values()).sort((a, b) => b.totalSpent - a.totalSpent);
+  }
+}
+
+function mapCouponRow(c: any): Coupon {
+  return {
+    id: c.id,
+    code: c.code,
+    type: c.type,
+    value: Number(c.value),
+    minimumOrder: Number(c.minimum_order),
+    maximumDiscount: c.maximum_discount != null ? Number(c.maximum_discount) : undefined,
+    startDate: c.start_date,
+    expiryDate: c.expiry_date,
+    usageLimit: c.usage_limit ?? undefined,
+    usedCount: c.used_count,
+    perUserLimit: c.per_user_limit ?? undefined,
+    isActive: c.is_active,
+    description: c.description || undefined,
+  };
+}
+
+function mapReviewRow(r: any): Review {
+  return {
+    id: r.id,
+    productId: r.product_id,
+    userName: r.user_name,
+    userEmail: r.user_email || undefined,
+    rating: r.rating,
+    title: r.title,
+    comment: r.comment,
+    isVerifiedPurchase: r.is_verified_purchase,
+    isApproved: r.is_approved,
+    createdAt: r.created_at,
+  };
+}
+
+function mapOrderRow(o: any): Order {
+  const items: OrderItem[] = (o.order_items || []).map((i: any) => ({
+    id: i.id,
+    productId: i.product_id,
+    variantId: i.variant_id,
+    title: i.title,
+    variantTitle: i.variant_title,
+    sku: i.sku,
+    color: i.color,
+    size: i.size,
+    price: Number(i.price),
+    quantity: i.quantity,
+    image: i.image || '',
+    total: Number(i.total),
+  }));
+
+  const statusHistory = (o.order_status_history || [])
+    .map((h: any) => ({ status: h.status, timestamp: h.created_at, note: h.note || undefined }))
+    .sort((a: any, b: any) => new Date(a.timestamp).getTime() - new Date(b.timestamp).getTime());
+
+  return {
+    id: o.id,
+    orderNumber: o.order_number,
+    customerId: o.user_id || undefined,
+    customerName: o.customer_name,
+    customerEmail: o.customer_email,
+    customerPhone: o.customer_phone,
+    shippingAddress: o.shipping_address,
+    billingAddress: o.billing_address || undefined,
+    items,
+    subtotal: Number(o.subtotal),
+    discount: Number(o.discount),
+    couponCode: o.coupon_code || undefined,
+    shippingCharge: Number(o.shipping_charge),
+    taxAmount: Number(o.tax_amount),
+    grandTotal: Number(o.grand_total),
+    paymentMethod: o.payment_method,
+    paymentStatus: o.payment_status,
+    orderStatus: o.order_status,
+    razorpayOrderId: o.razorpay_order_id || undefined,
+    razorpayPaymentId: o.razorpay_payment_id || undefined,
+    trackingNumber: o.tracking_number || undefined,
+    statusHistory,
+    notes: o.notes || undefined,
+    createdAt: o.created_at,
+    updatedAt: o.updated_at,
+  };
 }
 
 export const db = new DatabaseService();

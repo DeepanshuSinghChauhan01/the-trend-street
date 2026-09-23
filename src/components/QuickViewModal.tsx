@@ -1,9 +1,10 @@
-import React, { useState } from 'react';
+import React, { useEffect, useState } from 'react';
 import { Link } from 'react-router-dom';
 import { X, Star, ShoppingBag, Heart, Check, ArrowRight } from 'lucide-react';
 import { Product } from '../types/index.js';
 import { useCart } from '../context/CartContext.js';
 import { useWishlist } from '../context/WishlistContext.js';
+import { getGalleryImages } from '../lib/productImages.js';
 
 interface QuickViewModalProps {
   product: Product | null;
@@ -21,6 +22,11 @@ export const QuickViewModal: React.FC<QuickViewModalProps> = ({ product, onClose
   const [activeImage, setActiveImage] = useState(0);
   const [isAdded, setIsAdded] = useState(false);
 
+  // Switching colors shows that color's own gallery; reset to its first image.
+  useEffect(() => {
+    setActiveImage(0);
+  }, [selectedColor]);
+
   const isSaved = isInWishlist(product.id);
 
   // Available variants for selected color
@@ -32,6 +38,8 @@ export const QuickViewModal: React.FC<QuickViewModalProps> = ({ product, onClose
   const uniqueColors = Array.from(
     new Map(product.variants.map(v => [v.color, { name: v.color, hex: v.colorHex }])).values()
   );
+
+  const galleryImages = getGalleryImages(product.images, selectedColor);
 
   const availableSizes = ['XS', 'S', 'M', 'L', 'XL', 'XXL'].filter(s =>
     product.variants.some(v => v.size === s)
@@ -51,7 +59,7 @@ export const QuickViewModal: React.FC<QuickViewModalProps> = ({ product, onClose
       price: selectedVariant.price,
       compareAtPrice: selectedVariant.compareAtPrice,
       quantity: 1,
-      image: product.images[activeImage]?.url || product.images[0]?.url,
+      image: galleryImages[activeImage]?.url || galleryImages[0]?.url,
       slug: product.slug,
       maxStock: selectedVariant.stock,
     });
@@ -77,13 +85,13 @@ export const QuickViewModal: React.FC<QuickViewModalProps> = ({ product, onClose
           {/* Image Stage */}
           <div className="relative aspect-[3/4] bg-zinc-950">
             <img
-              src={product.images[activeImage]?.url || product.images[0]?.url}
+              src={galleryImages[activeImage]?.url || galleryImages[0]?.url}
               alt={product.title}
               className="w-full h-full object-cover"
             />
-            {product.images.length > 1 && (
+            {galleryImages.length > 1 && (
               <div className="absolute bottom-3 left-3 right-3 flex gap-2 overflow-x-auto py-1">
-                {product.images.map((img, i) => (
+                {galleryImages.map((img, i) => (
                   <button
                     key={img.id}
                     onClick={() => setActiveImage(i)}

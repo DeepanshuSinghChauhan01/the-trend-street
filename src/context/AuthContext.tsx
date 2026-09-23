@@ -18,7 +18,7 @@ interface AuthContextType {
   defaultAddress: ShippingAddress | null;
   login: (email: string, name?: string, phone?: string) => Promise<{ success: boolean; message?: string }>;
   logout: () => void;
-  adminLogin: (password: string) => Promise<{ success: boolean; message?: string }>;
+  adminLogin: (email: string, password: string) => Promise<{ success: boolean; message?: string }>;
   adminLogout: () => void;
   addAddress: (address: ShippingAddress) => void;
   deleteAddress: (index: number) => void;
@@ -43,13 +43,8 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
     }
   });
 
-  const [adminToken, setAdminToken] = useState<string | null>(() => {
-    try {
-      return localStorage.getItem('trendstreet_admin_token') || null;
-    } catch {
-      return null;
-    }
-  });
+  const [adminToken, setAdminToken] = useState<string | null>(null);
+  const [isAdmin, setIsAdmin] = useState(false);
 
   const [addresses, setAddresses] = useState<ShippingAddress[]>(() => {
     try {
@@ -81,13 +76,52 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
     }
   }, [user]);
 
+  // Sync admin state with the real Supabase session (persists across refresh via
+  // Supabase's own storage, and updates automatically on token refresh/sign-out).
   useEffect(() => {
-    if (adminToken) {
-      localStorage.setItem('trendstreet_admin_token', adminToken);
-    } else {
-      localStorage.removeItem('trendstreet_admin_token');
+    if (!isSupabaseConfigured) return;
+    let active = true;
+
+    async function syncSession(session: import('@supabase/supabase-js').Session | null) {
+      if (!session) {
+        if (active) {
+          setAdminToken(null);
+          setIsAdmin(false);
+        }
+        return;
+      }
+
+      const { data: profile } = await supabase
+        .from('profiles')
+        .select('role, full_name')
+        .eq('id', session.user.id)
+        .maybeSingle();
+
+      if (!active) return;
+
+      const role = profile?.role;
+      const hasAdminAccess = role === 'admin' || role === 'manager';
+      setAdminToken(hasAdminAccess ? session.access_token : null);
+      setIsAdmin(hasAdminAccess);
+
+      setUser({
+        id: session.user.id,
+        name: profile?.full_name || session.user.email?.split('@')[0] || 'Customer',
+        email: session.user.email || '',
+        role: hasAdminAccess ? 'admin' : 'customer',
+      });
     }
-  }, [adminToken]);
+
+    supabase.auth.getSession().then(({ data }) => syncSession(data.session));
+    const { data: listener } = supabase.auth.onAuthStateChange((_event, session) => {
+      syncSession(session);
+    });
+
+    return () => {
+      active = false;
+      listener.subscription.unsubscribe();
+    };
+  }, []);
 
   useEffect(() => {
     localStorage.setItem('trendstreet_addresses', JSON.stringify(addresses));
@@ -103,12 +137,15 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
       }
     }
 
+    // Optimistic local profile while the OTP email is pending verification.
+    // Real role/admin status is always derived from the verified Supabase
+    // session + profiles.role once sign-in completes (see the session-sync effect above).
     const newUser: User = {
       id: `usr-${Date.now()}`,
       name: name || email.split('@')[0],
       email,
       phone: phone || '',
-      role: email === 'trendstreet277@gmail.com' ? 'admin' : 'customer',
+      role: 'customer',
     };
     setUser(newUser);
     return { success: true };
@@ -121,26 +158,38 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
     }
   };
 
-  const adminLogin = async (password: string): Promise<{ success: boolean; message?: string }> => {
-    try {
-      const res = await fetch('/api/admin/auth/login', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ password, email: user?.email || 'trendstreet277@gmail.com' }),
-      });
-      const data = await res.json();
-      if (!res.ok || !data.success) {
-        return { success: false, message: data.message || 'Invalid admin credentials' };
-      }
-      setAdminToken(data.token);
-      return { success: true };
-    } catch {
-      return { success: false, message: 'Server communication error' };
+  const adminLogin = async (email: string, password: string): Promise<{ success: boolean; message?: string }> => {
+    if (!isSupabaseConfigured) {
+      return { success: false, message: 'Supabase is not configured. Set VITE_SUPABASE_URL and VITE_SUPABASE_ANON_KEY.' };
     }
+
+    const { data, error } = await supabase.auth.signInWithPassword({ email, password });
+    if (error || !data.session) {
+      return { success: false, message: error?.message || 'Invalid admin credentials.' };
+    }
+
+    const { data: profile } = await supabase
+      .from('profiles')
+      .select('role')
+      .eq('id', data.session.user.id)
+      .maybeSingle();
+
+    if (!profile || !['admin', 'manager'].includes(profile.role)) {
+      await supabase.auth.signOut();
+      return { success: false, message: 'This account does not have admin access.' };
+    }
+
+    setAdminToken(data.session.access_token);
+    setIsAdmin(true);
+    return { success: true };
   };
 
   const adminLogout = () => {
     setAdminToken(null);
+    setIsAdmin(false);
+    if (isSupabaseConfigured) {
+      supabase.auth.signOut().catch(() => {});
+    }
   };
 
   const addAddress = (address: ShippingAddress) => {
@@ -170,7 +219,7 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
       value={{
         user,
         adminToken,
-        isAdmin: Boolean(adminToken),
+        isAdmin,
         addresses,
         defaultAddress,
         login,

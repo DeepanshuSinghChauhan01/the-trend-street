@@ -1,10 +1,12 @@
 import React, { useState } from 'react';
 import { useNavigate } from 'react-router-dom';
-import { Lock, ShieldCheck, AlertCircle } from 'lucide-react';
+import { Lock, AlertCircle } from 'lucide-react';
 import { useAuth } from '../../context/AuthContext.js';
+import { isSupabaseConfigured } from '../../lib/supabase.js';
 
 export const AdminLoginPage: React.FC = () => {
-  const [password, setPassword] = useState('trendstreet_admin_2026_secure');
+  const [email, setEmail] = useState('');
+  const [password, setPassword] = useState('');
   const [error, setError] = useState('');
   const [isLoading, setIsLoading] = useState(false);
 
@@ -16,7 +18,7 @@ export const AdminLoginPage: React.FC = () => {
     setError('');
     setIsLoading(true);
 
-    const res = await adminLogin(password);
+    const res = await adminLogin(email, password);
     setIsLoading(false);
 
     if (res.success) {
@@ -41,6 +43,13 @@ export const AdminLoginPage: React.FC = () => {
           </p>
         </div>
 
+        {!isSupabaseConfigured && (
+          <div className="p-3 bg-amber-950/60 border border-amber-800 text-amber-300 text-xs flex items-center gap-2 rounded">
+            <AlertCircle className="w-4 h-4 shrink-0" />
+            <span>Supabase is not configured yet. Set VITE_SUPABASE_URL and VITE_SUPABASE_ANON_KEY in .env before logging in.</span>
+          </div>
+        )}
+
         {error && (
           <div className="p-3 bg-rose-950/60 border border-rose-800 text-rose-300 text-xs flex items-center gap-2 rounded">
             <AlertCircle className="w-4 h-4 shrink-0" />
@@ -51,33 +60,37 @@ export const AdminLoginPage: React.FC = () => {
         <form onSubmit={handleLogin} className="space-y-4 text-xs">
           <div>
             <label className="block text-zinc-400 mb-1 font-semibold uppercase tracking-wider">
-              Store Account Email
+              Admin Email
             </label>
             <input
               type="email"
-              disabled
-              value="trendstreet277@gmail.com"
-              className="w-full bg-zinc-950 border border-zinc-800 px-3 py-2.5 text-zinc-400 cursor-not-allowed"
+              required
+              value={email}
+              onChange={e => setEmail(e.target.value)}
+              placeholder="you@trendstreet.in"
+              autoComplete="username"
+              className="w-full bg-zinc-950 border border-zinc-700 px-3 py-2.5 text-white placeholder-zinc-600 focus:outline-none focus:border-white"
             />
           </div>
 
           <div>
             <label className="block text-zinc-400 mb-1 font-semibold uppercase tracking-wider">
-              Admin Master Password / Key
+              Password
             </label>
             <input
               type="password"
               required
               value={password}
               onChange={e => setPassword(e.target.value)}
-              placeholder="Enter admin password"
+              placeholder="Enter password"
+              autoComplete="current-password"
               className="w-full bg-zinc-950 border border-zinc-700 px-3 py-2.5 text-white placeholder-zinc-600 focus:outline-none focus:border-white"
             />
           </div>
 
           <button
             type="submit"
-            disabled={isLoading}
+            disabled={isLoading || !isSupabaseConfigured}
             className="w-full py-3.5 bg-white text-zinc-950 font-bold uppercase tracking-widest text-xs hover:bg-zinc-200 transition-colors disabled:opacity-50"
           >
             {isLoading ? 'Verifying...' : 'Access Admin Dashboard'}
@@ -85,7 +98,7 @@ export const AdminLoginPage: React.FC = () => {
         </form>
 
         <div className="pt-4 border-t border-zinc-800 text-center text-[11px] text-zinc-500">
-          <span>Protected by server-side authorization check</span>
+          <span>Authenticated via Supabase &middot; role-gated by profiles.role</span>
         </div>
       </div>
     </div>

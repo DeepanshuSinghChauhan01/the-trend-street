@@ -290,21 +290,291 @@ ALTER TABLE public.coupons ENABLE ROW LEVEL SECURITY;
 ALTER TABLE public.inventory_logs ENABLE ROW LEVEL SECURITY;
 
 -- Products / Catalog are publicly readable
+DROP POLICY IF EXISTS "Public can view active products" ON public.products;
 CREATE POLICY "Public can view active products" ON public.products
   FOR SELECT USING (status = 'active');
 
+DROP POLICY IF EXISTS "Public can view variants" ON public.product_variants;
 CREATE POLICY "Public can view variants" ON public.product_variants
   FOR SELECT USING (true);
 
+DROP POLICY IF EXISTS "Public can view product images" ON public.product_images;
 CREATE POLICY "Public can view product images" ON public.product_images
   FOR SELECT USING (true);
 
+DROP POLICY IF EXISTS "Public can view approved reviews" ON public.reviews;
 CREATE POLICY "Public can view approved reviews" ON public.reviews
   FOR SELECT USING (is_approved = true);
 
 -- Orders: Users can read their own orders; Admins can read all
+DROP POLICY IF EXISTS "Users can view own orders" ON public.orders;
 CREATE POLICY "Users can view own orders" ON public.orders
   FOR SELECT USING (auth.uid() = user_id);
 
+DROP POLICY IF EXISTS "Users can view own addresses" ON public.addresses;
 CREATE POLICY "Users can view own addresses" ON public.addresses
   FOR ALL USING (auth.uid() = user_id);
+
+-- ==========================================================
+-- ADDITIONAL PRODUCT FIELDS (subcategory, gender)
+-- ==========================================================
+ALTER TABLE public.products ADD COLUMN IF NOT EXISTS subcategory TEXT;
+ALTER TABLE public.products ADD COLUMN IF NOT EXISTS gender TEXT NOT NULL DEFAULT 'men';
+ALTER TABLE public.products DROP CONSTRAINT IF EXISTS products_gender_check;
+ALTER TABLE public.products ADD CONSTRAINT products_gender_check CHECK (gender IN ('men', 'women', 'unisex'));
+
+CREATE INDEX IF NOT EXISTS idx_products_collection ON public.products(collection_id);
+CREATE INDEX IF NOT EXISTS idx_products_subcategory ON public.products(subcategory);
+
+-- ==========================================================
+-- COLOR-SPECIFIC PRODUCT IMAGES
+-- Nullable: NULL = a product-level/fallback image (all existing rows stay
+-- exactly as they are — nothing is deleted, invalidated, or backfilled).
+-- Non-null = only shown when that specific color is selected on the storefront.
+-- ==========================================================
+ALTER TABLE public.product_images ADD COLUMN IF NOT EXISTS color TEXT;
+CREATE INDEX IF NOT EXISTS idx_product_images_color ON public.product_images(product_id, color);
+
+-- ==========================================================
+-- ADMIN ROLE HELPER (used by every write-side RLS policy below)
+-- ==========================================================
+CREATE OR REPLACE FUNCTION public.is_admin()
+RETURNS BOOLEAN
+LANGUAGE sql
+SECURITY DEFINER
+SET search_path = public
+STABLE
+AS $$
+  SELECT EXISTS (
+    SELECT 1 FROM public.profiles
+    WHERE id = auth.uid() AND role IN ('admin', 'manager')
+  );
+$$;
+
+-- Auto-provision a profile row (role='customer') whenever a new Supabase Auth user signs up
+CREATE OR REPLACE FUNCTION public.handle_new_user()
+RETURNS TRIGGER
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = public
+AS $$
+BEGIN
+  INSERT INTO public.profiles (id, full_name, role)
+  VALUES (
+    NEW.id,
+    COALESCE(NEW.raw_user_meta_data->>'full_name', split_part(NEW.email, '@', 1)),
+    'customer'
+  )
+  ON CONFLICT (id) DO NOTHING;
+  RETURN NEW;
+END;
+$$;
+
+DROP TRIGGER IF EXISTS on_auth_user_created ON auth.users;
+CREATE TRIGGER on_auth_user_created
+  AFTER INSERT ON auth.users
+  FOR EACH ROW EXECUTE FUNCTION public.handle_new_user();
+
+-- Prevent a customer from self-escalating their own role via a direct profile update
+CREATE OR REPLACE FUNCTION public.prevent_role_self_escalation()
+RETURNS TRIGGER
+LANGUAGE plpgsql
+AS $$
+BEGIN
+  IF NEW.role IS DISTINCT FROM OLD.role AND auth.role() <> 'service_role' THEN
+    NEW.role := OLD.role;
+  END IF;
+  RETURN NEW;
+END;
+$$;
+
+DROP TRIGGER IF EXISTS guard_profiles_role ON public.profiles;
+CREATE TRIGGER guard_profiles_role
+  BEFORE UPDATE ON public.profiles
+  FOR EACH ROW EXECUTE FUNCTION public.prevent_role_self_escalation();
+
+-- Keep updated_at fresh automatically
+CREATE OR REPLACE FUNCTION public.set_updated_at()
+RETURNS TRIGGER
+LANGUAGE plpgsql
+AS $$
+BEGIN
+  NEW.updated_at = NOW();
+  RETURN NEW;
+END;
+$$;
+
+DROP TRIGGER IF EXISTS set_products_updated_at ON public.products;
+CREATE TRIGGER set_products_updated_at BEFORE UPDATE ON public.products
+  FOR EACH ROW EXECUTE FUNCTION public.set_updated_at();
+
+DROP TRIGGER IF EXISTS set_variants_updated_at ON public.product_variants;
+CREATE TRIGGER set_variants_updated_at BEFORE UPDATE ON public.product_variants
+  FOR EACH ROW EXECUTE FUNCTION public.set_updated_at();
+
+DROP TRIGGER IF EXISTS set_orders_updated_at ON public.orders;
+CREATE TRIGGER set_orders_updated_at BEFORE UPDATE ON public.orders
+  FOR EACH ROW EXECUTE FUNCTION public.set_updated_at();
+
+DROP TRIGGER IF EXISTS set_addresses_updated_at ON public.addresses;
+CREATE TRIGGER set_addresses_updated_at BEFORE UPDATE ON public.addresses
+  FOR EACH ROW EXECUTE FUNCTION public.set_updated_at();
+
+DROP TRIGGER IF EXISTS set_profiles_updated_at ON public.profiles;
+CREATE TRIGGER set_profiles_updated_at BEFORE UPDATE ON public.profiles
+  FOR EACH ROW EXECUTE FUNCTION public.set_updated_at();
+
+-- ==========================================================
+-- REMAINING TABLES: ENABLE RLS
+-- ==========================================================
+ALTER TABLE public.categories ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.collections ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.coupon_usages ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.order_status_history ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.payments ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.wishlists ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.wishlist_items ENABLE ROW LEVEL SECURITY;
+
+-- ==========================================================
+-- PROFILES: self read/update, admins read all
+-- ==========================================================
+DROP POLICY IF EXISTS "Users can view own profile" ON public.profiles;
+CREATE POLICY "Users can view own profile" ON public.profiles
+  FOR SELECT USING (auth.uid() = id OR public.is_admin());
+
+DROP POLICY IF EXISTS "Users can update own profile" ON public.profiles;
+CREATE POLICY "Users can update own profile" ON public.profiles
+  FOR UPDATE USING (auth.uid() = id) WITH CHECK (auth.uid() = id);
+
+-- ==========================================================
+-- CATEGORIES & COLLECTIONS: public read, admin write
+-- ==========================================================
+DROP POLICY IF EXISTS "Public can view categories" ON public.categories;
+CREATE POLICY "Public can view categories" ON public.categories
+  FOR SELECT USING (true);
+
+DROP POLICY IF EXISTS "Admins manage categories" ON public.categories;
+CREATE POLICY "Admins manage categories" ON public.categories
+  FOR ALL USING (public.is_admin()) WITH CHECK (public.is_admin());
+
+DROP POLICY IF EXISTS "Public can view active collections" ON public.collections;
+CREATE POLICY "Public can view active collections" ON public.collections
+  FOR SELECT USING (is_active = true OR public.is_admin());
+
+DROP POLICY IF EXISTS "Admins manage collections" ON public.collections;
+CREATE POLICY "Admins manage collections" ON public.collections
+  FOR ALL USING (public.is_admin()) WITH CHECK (public.is_admin());
+
+-- ==========================================================
+-- PRODUCTS / VARIANTS / IMAGES: admin write access
+-- (public read policies already exist above)
+-- ==========================================================
+DROP POLICY IF EXISTS "Admins manage products" ON public.products;
+CREATE POLICY "Admins manage products" ON public.products
+  FOR ALL USING (public.is_admin()) WITH CHECK (public.is_admin());
+
+DROP POLICY IF EXISTS "Admins manage variants" ON public.product_variants;
+CREATE POLICY "Admins manage variants" ON public.product_variants
+  FOR ALL USING (public.is_admin()) WITH CHECK (public.is_admin());
+
+DROP POLICY IF EXISTS "Admins manage product images" ON public.product_images;
+CREATE POLICY "Admins manage product images" ON public.product_images
+  FOR ALL USING (public.is_admin()) WITH CHECK (public.is_admin());
+
+-- ==========================================================
+-- ORDERS / ORDER ITEMS / STATUS HISTORY / PAYMENTS / COUPONS
+-- ==========================================================
+DROP POLICY IF EXISTS "Admins manage all orders" ON public.orders;
+CREATE POLICY "Admins manage all orders" ON public.orders
+  FOR ALL USING (public.is_admin()) WITH CHECK (public.is_admin());
+
+DROP POLICY IF EXISTS "Users view own order items" ON public.order_items;
+CREATE POLICY "Users view own order items" ON public.order_items
+  FOR SELECT USING (
+    EXISTS (SELECT 1 FROM public.orders o WHERE o.id = order_id AND o.user_id = auth.uid())
+  );
+
+DROP POLICY IF EXISTS "Admins manage order items" ON public.order_items;
+CREATE POLICY "Admins manage order items" ON public.order_items
+  FOR ALL USING (public.is_admin()) WITH CHECK (public.is_admin());
+
+DROP POLICY IF EXISTS "Users view own order status history" ON public.order_status_history;
+CREATE POLICY "Users view own order status history" ON public.order_status_history
+  FOR SELECT USING (
+    EXISTS (SELECT 1 FROM public.orders o WHERE o.id = order_id AND o.user_id = auth.uid())
+  );
+
+DROP POLICY IF EXISTS "Admins manage order status history" ON public.order_status_history;
+CREATE POLICY "Admins manage order status history" ON public.order_status_history
+  FOR ALL USING (public.is_admin()) WITH CHECK (public.is_admin());
+
+DROP POLICY IF EXISTS "Admins manage payments" ON public.payments;
+CREATE POLICY "Admins manage payments" ON public.payments
+  FOR ALL USING (public.is_admin()) WITH CHECK (public.is_admin());
+
+DROP POLICY IF EXISTS "Admins manage coupons" ON public.coupons;
+CREATE POLICY "Admins manage coupons" ON public.coupons
+  FOR ALL USING (public.is_admin()) WITH CHECK (public.is_admin());
+
+DROP POLICY IF EXISTS "Admins manage coupon usages" ON public.coupon_usages;
+CREATE POLICY "Admins manage coupon usages" ON public.coupon_usages
+  FOR ALL USING (public.is_admin()) WITH CHECK (public.is_admin());
+
+DROP POLICY IF EXISTS "Admins manage inventory logs" ON public.inventory_logs;
+CREATE POLICY "Admins manage inventory logs" ON public.inventory_logs
+  FOR ALL USING (public.is_admin()) WITH CHECK (public.is_admin());
+
+-- ==========================================================
+-- REVIEWS: customers can submit, admins moderate
+-- ==========================================================
+DROP POLICY IF EXISTS "Users can add reviews" ON public.reviews;
+CREATE POLICY "Users can add reviews" ON public.reviews
+  FOR INSERT WITH CHECK (auth.uid() = user_id OR user_id IS NULL);
+
+DROP POLICY IF EXISTS "Admins manage reviews" ON public.reviews;
+CREATE POLICY "Admins manage reviews" ON public.reviews
+  FOR ALL USING (public.is_admin()) WITH CHECK (public.is_admin());
+
+-- ==========================================================
+-- WISHLISTS: each user manages only their own
+-- ==========================================================
+DROP POLICY IF EXISTS "Users manage own wishlist" ON public.wishlists;
+CREATE POLICY "Users manage own wishlist" ON public.wishlists
+  FOR ALL USING (auth.uid() = user_id) WITH CHECK (auth.uid() = user_id);
+
+DROP POLICY IF EXISTS "Users manage own wishlist items" ON public.wishlist_items;
+CREATE POLICY "Users manage own wishlist items" ON public.wishlist_items
+  FOR ALL USING (
+    EXISTS (SELECT 1 FROM public.wishlists w WHERE w.id = wishlist_id AND w.user_id = auth.uid())
+  ) WITH CHECK (
+    EXISTS (SELECT 1 FROM public.wishlists w WHERE w.id = wishlist_id AND w.user_id = auth.uid())
+  );
+
+-- ==========================================================
+-- STORAGE: product-images bucket (public read, admin write)
+-- ==========================================================
+INSERT INTO storage.buckets (id, name, public)
+VALUES ('product-images', 'product-images', true)
+ON CONFLICT (id) DO NOTHING;
+
+DROP POLICY IF EXISTS "Public can view product images bucket" ON storage.objects;
+CREATE POLICY "Public can view product images bucket" ON storage.objects
+  FOR SELECT USING (bucket_id = 'product-images');
+
+DROP POLICY IF EXISTS "Admins can upload product images" ON storage.objects;
+CREATE POLICY "Admins can upload product images" ON storage.objects
+  FOR INSERT WITH CHECK (bucket_id = 'product-images' AND public.is_admin());
+
+DROP POLICY IF EXISTS "Admins can update product images" ON storage.objects;
+CREATE POLICY "Admins can update product images" ON storage.objects
+  FOR UPDATE USING (bucket_id = 'product-images' AND public.is_admin());
+
+DROP POLICY IF EXISTS "Admins can delete product images" ON storage.objects;
+CREATE POLICY "Admins can delete product images" ON storage.objects
+  FOR DELETE USING (bucket_id = 'product-images' AND public.is_admin());
+
+-- ==========================================================
+-- FIRST ADMIN BOOTSTRAP
+-- After a user signs up through Supabase Auth (see README), run:
+--   UPDATE public.profiles SET role = 'admin' WHERE id = '<their auth.users id>';
+-- ==========================================================
